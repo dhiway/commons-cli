@@ -72,14 +72,14 @@ pub fn run(data_dir: &Path, command: CapCommand, human: bool) -> Result<()> {
         async move {
             commons_node_client::local::local_admin_call(&data_dir, method, params)
                 .await
-                .with_context(|| format!("{method} on {}", socket_path(&data_dir).display()))
+                .map_err(|err| node_error(method, &data_dir, &err))
         }
     };
     match command {
         CapCommand::List { cursor } => {
             let answer = runtime.block_on(list(caller, cursor))?;
             if human {
-                print_list(&answer);
+                print!("{}", render_list(&answer));
             } else {
                 println!("{}", serde_json::to_string_pretty(&answer)?);
             }
@@ -87,7 +87,7 @@ pub fn run(data_dir: &Path, command: CapCommand, human: bool) -> Result<()> {
         CapCommand::Show { namespace } => {
             let (kind, answer) = runtime.block_on(show(caller, &namespace))?;
             if human {
-                print_shown(kind, &answer);
+                print!("{}", render_shown(kind, &answer));
             } else {
                 println!("{}", serde_json::to_string_pretty(&answer)?);
             }
@@ -113,7 +113,10 @@ where
     for answer in [plugins, datasets] {
         match answer {
             Value::Object(fields) => merged.extend(fields),
-            other => bail!("the node answered a list with {other}, not an object"),
+            other => bail!(
+                "the node answered a list with {}, not an object",
+                escape(&other.to_string())
+            ),
         }
     }
     Ok(Value::Object(merged))
@@ -143,25 +146,58 @@ where
     match call("dataset_show", params).await {
         Ok(answer) => Ok((Kind::Dataset, answer)),
         Err(dataset_refusal) => bail!(
-            "{namespace} is neither a plugin document nor a dataset of this node. \
-             The node said: {plugin_refusal:#}; {dataset_refusal:#}"
+            "{} is neither a plugin document nor a dataset of this node. \
+             The node said: {plugin_refusal:#}; {dataset_refusal:#}",
+            escape(namespace)
         ),
     }
 }
 
+/// A string from the node made safe for a terminal: every control
+/// character (ESC, CR, BEL, C1 controls such as U+009B, DEL) is written in its
+/// escaped form, so a title or a refusal cannot move the cursor, recolour or
+/// rewrite the operator's screen. Only the human output and error messages
+/// pass through here; JSON output is the node's answer, which serde_json
+/// already encodes with its control characters escaped.
+pub fn escape(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        if c.is_control() {
+            out.extend(c.escape_default());
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// A refusal or failure from the local admin call, with the node's text
+/// escaped. The chain is flattened into one line because a node message must
+/// not reach the terminal through `anyhow`'s own display unescaped.
+fn node_error(method: &str, data_dir: &Path, err: &anyhow::Error) -> anyhow::Error {
+    anyhow::anyhow!(
+        "{method} on {}: {}",
+        socket_path(data_dir).display(),
+        escape(&format!("{err:#}"))
+    )
+}
+
 fn text(value: &Value) -> String {
-    match value {
+    escape(&match value {
         Value::String(s) => s.clone(),
         Value::Null => "-".into(),
         other => other.to_string(),
-    }
+    })
 }
 
-fn print_list(answer: &Value) {
+fn render_list(answer: &Value) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::new();
     let plugins = answer["plugins"].as_array().cloned().unwrap_or_default();
-    println!("plugin documents: {}", plugins.len());
+    let _ = writeln!(out, "plugin documents: {}", plugins.len());
     for plugin in &plugins {
-        println!(
+        let _ = writeln!(
+            out,
             "  {}  {}  current {}",
             text(&plugin["namespace"]),
             text(&plugin["title"]),
@@ -169,9 +205,10 @@ fn print_list(answer: &Value) {
         );
     }
     let datasets = answer["datasets"].as_array().cloned().unwrap_or_default();
-    println!("datasets: {}", datasets.len());
+    let _ = writeln!(out, "datasets: {}", datasets.len());
     for dataset in &datasets {
-        println!(
+        let _ = writeln!(
+            out,
             "  {}  versioned {}  retired {}",
             text(&dataset["namespace"]),
             text(&dataset["versioned"]),
@@ -179,12 +216,16 @@ fn print_list(answer: &Value) {
         );
     }
     if !answer["cursor"].is_null() {
-        println!("more datasets: --cursor {}", text(&answer["cursor"]));
+        let _ = writeln!(out, "more datasets: --cursor {}", text(&answer["cursor"]));
     }
+    out
 }
 
-fn print_shown(kind: Kind, answer: &Value) {
-    println!(
+fn render_shown(kind: Kind, answer: &Value) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
         "kind: {}",
         match kind {
             Kind::Plugin => "plugin document",
@@ -193,11 +234,12 @@ fn print_shown(kind: Kind, answer: &Value) {
     );
     if let Some(fields) = answer.as_object() {
         for (k, v) in fields {
-            println!("{k}: {}", text(v));
+            let _ = writeln!(out, "{}: {}", escape(k), text(v));
         }
     } else {
-        println!("{}", text(answer));
+        let _ = writeln!(out, "{}", text(answer));
     }
+    out
 }
 
 #[cfg(test)]
@@ -298,6 +340,75 @@ mod tests {
         };
         let err = show(call, "bad").await.unwrap_err().to_string();
         assert!(err.contains("invalid namespace"), "{err}");
+    }
+
+    /// The raw characters a hostile title would carry: ESC starting a colour
+    /// sequence, a CR that returns to the start of the line, and the C1 CSI.
+    const HOSTILE: &str = "ok\u{1b}[31mred\rforged\u{9b}2J";
+
+    fn assert_no_raw_controls(line: &str) {
+        assert!(
+            !line.contains('\u{1b}') && !line.contains('\r') && !line.contains('\u{9b}'),
+            "raw control character reached the terminal: {line:?}"
+        );
+    }
+
+    #[test]
+    fn a_plugin_title_with_escapes_is_escaped_for_humans_and_kept_in_json() {
+        let answer = json!({
+            "plugins": [{"namespace": "p1", "title": HOSTILE, "current": null}],
+            "datasets": [],
+            "cursor": null,
+        });
+        let human = render_list(&answer);
+        assert_no_raw_controls(&human);
+        assert!(
+            human.contains(r"ok\u{1b}[31mred\rforged\u{9b}2J"),
+            "{human}"
+        );
+
+        let encoded = serde_json::to_string_pretty(&answer).unwrap();
+        assert!(encoded.contains(r"ok\u001b[31mred\rforged"), "{encoded}");
+        let decoded: Value = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(
+            decoded["plugins"][0]["title"], HOSTILE,
+            "JSON keeps the node's string"
+        );
+    }
+
+    #[test]
+    fn a_card_title_with_escapes_is_escaped_for_humans_and_kept_in_json() {
+        let answer = json!({
+            "namespace": "d1",
+            "card": {"title": HOSTILE, "summary": null},
+            "ingestion": null,
+            "materializers": [],
+        });
+        let human = render_shown(Kind::Dataset, &answer);
+        assert_no_raw_controls(&human);
+        assert!(human.contains("card: "), "{human}");
+
+        let encoded = serde_json::to_string_pretty(&answer).unwrap();
+        assert!(encoded.contains(r"\u001b"), "{encoded}");
+        let decoded: Value = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(
+            decoded["card"]["title"], HOSTILE,
+            "JSON keeps the node's string"
+        );
+    }
+
+    #[test]
+    fn a_node_error_message_with_escapes_is_escaped_in_the_error() {
+        let refusal = anyhow::anyhow!("local Admin RPC: no \u{1b}[2Ksuch\rthing");
+        let err = node_error("plugin_show", Path::new("/tmp/d"), &refusal);
+        let shown = format!("{err:#}");
+        let debug = format!("{err:?}");
+        assert_no_raw_controls(&shown);
+        assert_no_raw_controls(&debug);
+        assert!(
+            shown.starts_with("plugin_show on /tmp/d/admin/admin.sock: local Admin RPC: no \\u{1b}[2Ksuch\\rthing"),
+            "{shown}"
+        );
     }
 
     #[test]
