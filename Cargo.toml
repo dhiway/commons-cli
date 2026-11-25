@@ -30,3 +30,10 @@ iroh-relay = { git = "https://github.com/dhiway/iroh", rev = "53eeba9b1da316c8e6
 noq = { git = "https://github.com/dhiway/noq", rev = "a651c1353017ab6643ea65880ce390fcd2df547d" }
 noq-proto = { git = "https://github.com/dhiway/noq", rev = "a651c1353017ab6643ea65880ce390fcd2df547d" }
 noq-udp = { git = "https://github.com/dhiway/noq", rev = "a651c1353017ab6643ea65880ce390fcd2df547d" }
+
+# Release binaries are optimised (owner ruling 2026-11-20): no debug build is
+# ever published. Step G's per-platform release uses this profile.
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true

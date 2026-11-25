@@ -60,8 +60,8 @@ enum NodeCommand {
         /// have enrolled it with `cmn admins add <endpoint-id>`.
         #[arg(long)]
         key: PathBuf,
-        /// Seconds to wait for the node.
-        #[arg(long, default_value_t = DEFAULT_TIMEOUT_SECS)]
+        /// Seconds to wait for the node, for the whole exchange.
+        #[arg(long, default_value_t = DEFAULT_TIMEOUT_SECS, value_parser = clap::value_parser!(u64).range(1..))]
         timeout: u64,
     },
 }
@@ -74,11 +74,7 @@ impl Cli {
     fn run(self) -> Result<()> {
         match self.command {
             Command::Version => {
-                let v = json!({
-                    "cmns": env!("CARGO_PKG_VERSION"),
-                    "compatible": COMPATIBLE_NODE,
-                    "client_rev": CLIENT_REV,
-                });
+                let v = version_report();
                 print_json(&v, self.human)?;
             }
             Command::Node { command } => match command {
@@ -97,9 +93,21 @@ impl Cli {
     }
 }
 
+/// What `cmns version` prints. A function so a test can read the fields the
+/// command actually emits, not only the constants behind them.
+fn version_report() -> Value {
+    json!({
+        "cmns": env!("CARGO_PKG_VERSION"),
+        "compatible": COMPATIBLE_NODE,
+        "client_rev": CLIENT_REV,
+    })
+}
+
 fn print_json(value: &Value, human: bool) -> Result<()> {
     if human {
-        // One `key: value` line per field, in the order the node wrote them.
+        // One `key: value` line per field. serde_json's maps are ordered by
+        // key (no preserve_order), so this is alphabetical, not the node's
+        // own order; values are the node's.
         match value.as_object() {
             Some(map) => {
                 for (k, v) in map {
@@ -144,10 +152,11 @@ async fn node_status(ticket: &str, key_path: &PathBuf, timeout_secs: u64) -> Res
         .bind()
         .await
         .context("binding the caller's endpoint")?;
-    let deadline = Duration::from_secs(timeout_secs);
+    let budget = Duration::from_secs(timeout_secs);
+    let started = std::time::Instant::now();
 
     let client = match tokio::time::timeout(
-        deadline,
+        budget,
         ControlClient::connect(&endpoint, addr.clone(), &key, &[OP_ADMIN_NODE_INFO]),
     )
     .await
@@ -170,7 +179,23 @@ async fn node_status(ticket: &str, key_path: &PathBuf, timeout_secs: u64) -> Res
         }
     };
 
-    let answer = client.call(OP_ADMIN_NODE_INFO, &json!({}), None).await;
+    // The timeout covers the whole exchange, not only the dial: the client's
+    // request has no deadline of its own, so a node that opens the session and
+    // then stalls would otherwise hang the command.
+    let left = budget.saturating_sub(started.elapsed());
+    let answer = match tokio::time::timeout(left, client.call(OP_ADMIN_NODE_INFO, &json!({}), None))
+        .await
+    {
+        Err(_) => {
+            client.close();
+            endpoint.close().await;
+            bail!(
+                "the node accepted the session but did not answer within {timeout_secs}s (ticket names {})",
+                addr.id
+            );
+        }
+        Ok(answer) => answer,
+    };
     client.close();
     endpoint.close().await;
 
@@ -189,20 +214,32 @@ async fn node_status(ticket: &str, key_path: &PathBuf, timeout_secs: u64) -> Res
 /// Refuse an answer from a node this build was not written for.
 ///
 /// The check is deliberately narrow: a node that reports a `version` other
-/// than 0.9.x is refused with a sentence naming both sides, because acting on
-/// it is guessing. A node that reports no version at all is not refused — the
-/// interface answered, and the caller can see the absence.
+/// than 0.9.x is refused, and the message says which side is older, because
+/// acting on it is guessing. A node that reports no version at all is not
+/// refused — the interface answered, and the caller can see the absence.
 fn ensure_compatible(answer: &Value, node: &str) -> Result<()> {
     let Some(version) = answer.get("version").and_then(Value::as_str) else {
         return Ok(());
     };
-    if version.starts_with("0.9.") {
+    let Some((major, minor)) = parse_minor(version) else {
+        bail!("the node {node} reports version {version}, which this cmns cannot read; this build is written for {COMPATIBLE_NODE}");
+    };
+    if (major, minor) == (0, 9) {
         return Ok(());
     }
-    bail!(
-        "this cmns {} is written for {COMPATIBLE_NODE}; the node {node} answers version {version}. Upgrade one side; cmns refuses rather than guess.",
-        env!("CARGO_PKG_VERSION")
-    )
+    let ourselves = format!("cmns {}", env!("CARGO_PKG_VERSION"));
+    if (major, minor) < (0, 9) {
+        bail!("the node {node} is older: it answers version {version}, and {ourselves} is written for {COMPATIBLE_NODE}. Upgrade the node, or use a cmns built for it.");
+    }
+    bail!("{ourselves} is older: the node {node} answers version {version}, and this build is written for {COMPATIBLE_NODE}. Upgrade cmns.");
+}
+
+/// `0.9.47` -> (0, 9). Anything else is `None` and is refused as unreadable.
+fn parse_minor(version: &str) -> Option<(u32, u32)> {
+    let mut parts = version.split('.');
+    let major = parts.next()?.parse().ok()?;
+    let minor = parts.next()?.parse().ok()?;
+    Some((major, minor))
 }
 
 #[cfg(test)]
@@ -213,8 +250,27 @@ mod tests {
     fn version_reports_the_cli_and_the_node_it_works_with() {
         let cli = Cli::try_parse_from(["cmns", "version"]).expect("version parses");
         assert!(matches!(cli.command, Command::Version));
-        assert!(COMPATIBLE_NODE.contains("node 0.9.x"));
-        assert_eq!(env!("CARGO_PKG_VERSION"), "0.1.0");
+        let v = version_report();
+        assert_eq!(v["cmns"], env!("CARGO_PKG_VERSION"));
+        assert!(v["compatible"].as_str().unwrap().contains("node 0.9.x"));
+        assert_eq!(v["client_rev"], CLIENT_REV);
+    }
+
+    #[test]
+    fn a_timeout_of_zero_is_refused_by_the_parser() {
+        let err = Cli::try_parse_from([
+            "cmns",
+            "node",
+            "status",
+            "--ticket",
+            "t",
+            "--key",
+            "k",
+            "--timeout",
+            "0",
+        ])
+        .unwrap_err();
+        assert!(err.to_string().contains("0"), "{err}");
     }
 
     #[test]
@@ -239,12 +295,24 @@ mod tests {
     }
 
     #[test]
-    fn a_node_from_another_minor_version_is_refused_by_name() {
+    fn a_node_from_another_minor_version_is_refused_naming_the_older_side() {
         let ok = json!({"version": "0.9.47"});
         assert!(ensure_compatible(&ok, "n1").is_ok());
+
         let old = json!({"version": "0.8.1"});
         let err = ensure_compatible(&old, "n1").unwrap_err().to_string();
-        assert!(err.contains("0.8.1") && err.contains("0.9.x"), "{err}");
+        assert!(
+            err.contains("0.8.1") && err.contains("node n1 is older"),
+            "{err}"
+        );
+
+        let newer = json!({"version": "0.10.0"});
+        let err = ensure_compatible(&newer, "n1").unwrap_err().to_string();
+        assert!(err.contains("cmns 0.1.0 is older"), "{err}");
+
+        let unreadable = json!({"version": "one"});
+        assert!(ensure_compatible(&unreadable, "n1").is_err());
+
         let silent = json!({"health": "ready"});
         assert!(ensure_compatible(&silent, "n1").is_ok());
     }

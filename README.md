@@ -48,7 +48,22 @@ milliseconds). Two things a reader should know:
 - `relayConnected: null` means the node did not report a relay connection,
   which for an offline node is expected; `cmn` prints `false` for the same
   state.
-- A node that reports a version other than 0.9.x is refused, not guessed at.
+- A node that reports a version other than 0.9.x is refused, and the message
+  says which side is older.
+
+Reaching a node today needs the node's direct addresses, which the ticket
+carries; `RelayMode::Disabled` is what is built. A node that is reachable only
+through a relay cannot be reached yet, because the relay and lookup set-up the
+client calls the "Commons profile" is not exported by the client crates.
+
+## Building and dependencies
+
+`commons-node-client` is pinned by revision over `ssh://`, so a builder needs
+SSH access to GitHub; the transport forks are fetched over https. The pins in
+this repository's `transport-pins.toml` are a copy of the client repository's
+canonical file at the pinned revision; `scripts/check-transport-pins.py`
+compares them against this repository's `Cargo.lock`, so the copy must be
+refreshed in the same commit as a client re-pin.
 
 ## Licence
 
