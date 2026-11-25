@@ -12,7 +12,7 @@ repository = "https://github.com/dhiway/commons-cli"
 [workspace.dependencies]
 anyhow = "1.0"
 clap = { version = "4", features = ["derive"] }
-commons-node-client = { git = "ssh://git@github.com/dhiway/commons-node-client.git", rev = "28b9fec00c7e5b67a3ef76f39155b934b68e9e66", features = ["commons-profile"] }
+commons-node-client = { git = "ssh://git@github.com/dhiway/commons-node-client.git", rev = "4d318991bf3d4175106d0d04c447b1a5e5c7e613", features = ["commons-profile"] }
 hex = "0.4.3"
 iroh = { version = "1.5", features = ["default"] }
 iroh-tickets = "1"
