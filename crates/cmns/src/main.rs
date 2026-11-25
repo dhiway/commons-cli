@@ -221,12 +221,30 @@ fn print_json(value: &Value, human: bool) -> Result<()> {
     Ok(())
 }
 
+/// A string from the node made safe for a terminal: every control
+/// character (ESC, CR, BEL, C1 controls such as U+009B, DEL) is written in its
+/// escaped form, so a title or a refusal cannot move the cursor, recolour or
+/// rewrite the operator's screen. Only the human output and error messages
+/// pass through here (here, in `scalar`, and in `cap`); JSON output is the
+/// node's answer as serde_json encodes it.
+pub(crate) fn escape(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        if c.is_control() {
+            out.extend(c.escape_default());
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
 fn scalar(value: &Value) -> String {
-    match value {
+    escape(&match value {
         Value::String(s) => s.clone(),
         Value::Null => "-".into(),
         other => other.to_string(),
-    }
+    })
 }
 
 fn read_key(path: &PathBuf) -> Result<SecretKey> {
@@ -278,7 +296,9 @@ async fn admin_call(op: &str, params: Value, conn: &Conn) -> Result<Value> {
         Ok(Err(ClientError::Refused { code, payload, .. })) => {
             endpoint.close().await;
             bail!(
-                "the node refused this key {caller} ({code}): {payload}. The node's operator enrols it with `cmn admins add {caller}`.",
+                "the node refused this key {caller} ({}): {}. The node's operator enrols it with `cmn admins add {caller}`.",
+                escape(&code.to_string()),
+                escape(&payload.to_string()),
                 caller = key.public().to_z32()
             );
         }
@@ -312,7 +332,11 @@ async fn admin_call(op: &str, params: Value, conn: &Conn) -> Result<Value> {
             Ok(value)
         }
         Err(ClientError::Refused { code, payload, .. }) => {
-            bail!("the node refused the call ({code}): {payload}")
+            bail!(
+                "the node refused the call ({}): {}",
+                escape(&code.to_string()),
+                escape(&payload.to_string())
+            )
         }
         Err(err) => Err(err.into()),
     }
@@ -328,6 +352,8 @@ fn ensure_compatible(answer: &Value, node: &str) -> Result<()> {
     let Some(version) = answer.get("version").and_then(Value::as_str) else {
         return Ok(());
     };
+    let version = escape(version);
+    let version = version.as_str();
     let Some((major, minor)) = parse_minor(version) else {
         bail!("the node {node} reports version {version}, which this cmns cannot read; this build is written for {COMPATIBLE_NODE}");
     };
@@ -466,6 +492,35 @@ mod tests {
                 .is_err(),
             "dataset show needs a namespace"
         );
+    }
+
+    /// `--human` on the M2 read commands (`api status`, `dataset show`, ...)
+    /// prints node strings through `scalar`; a control character there is
+    /// escaped for the terminal and left as the node sent it in JSON.
+    #[test]
+    fn a_control_character_in_a_node_string_is_escaped_for_humans_and_kept_in_json() {
+        let hostile = "title\u{1b}[31mRED\rFORGED\u{9b}2J\u{7f}";
+        let human = scalar(&json!(hostile));
+        assert!(
+            !human.chars().any(char::is_control),
+            "raw control character for the terminal: {human:?}"
+        );
+        assert_eq!(human, r"title\u{1b}[31mRED\rFORGED\u{9b}2J\u{7f}");
+
+        let answer = json!({ "card": { "title": hostile } });
+        let encoded = serde_json::to_string_pretty(&answer).unwrap();
+        assert!(encoded.contains(r"title\u001b[31mRED\rFORGED"), "{encoded}");
+        let decoded: Value = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(
+            decoded["card"]["title"], hostile,
+            "JSON keeps the node's string"
+        );
+        let nested = scalar(&answer["card"]);
+        assert!(!nested.chars().any(char::is_control), "{nested:?}");
+
+        let old = json!({ "version": "0.8.1\u{1b}[2K" });
+        let err = ensure_compatible(&old, "n1").unwrap_err().to_string();
+        assert!(!err.chars().any(char::is_control), "{err:?}");
     }
 
     #[test]

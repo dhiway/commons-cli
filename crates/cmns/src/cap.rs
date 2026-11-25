@@ -19,6 +19,8 @@ use anyhow::{bail, Context, Result};
 use clap::Subcommand;
 use serde_json::{json, Map, Value};
 
+use crate::escape;
+
 /// The node's own default data directory (`commons-node`,
 /// `crates/node/src/config.rs`, `default_data_dir`).
 pub const DEFAULT_DATA_DIR: &str = "./data";
@@ -151,24 +153,6 @@ where
             escape(namespace)
         ),
     }
-}
-
-/// A string from the node made safe for a terminal: every control
-/// character (ESC, CR, BEL, C1 controls such as U+009B, DEL) is written in its
-/// escaped form, so a title or a refusal cannot move the cursor, recolour or
-/// rewrite the operator's screen. Only the human output and error messages
-/// pass through here; JSON output is the node's answer, which serde_json
-/// already encodes with its control characters escaped.
-pub fn escape(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    for c in text.chars() {
-        if c.is_control() {
-            out.extend(c.escape_default());
-        } else {
-            out.push(c);
-        }
-    }
-    out
 }
 
 /// A refusal or failure from the local admin call, with the node's text
