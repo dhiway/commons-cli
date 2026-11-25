@@ -593,7 +593,7 @@ checksum = "1505bd5d3d116872e7271a6d4e16d81d0c8570876c8de68093a09ac269d8aac0"
 [[package]]
 name = "auth-wire"
 version = "0.9.48"
-source = "git+ssh://git@github.com/dhiway/commons-node-client.git?rev=4d318991bf3d4175106d0d04c447b1a5e5c7e613#4d318991bf3d4175106d0d04c447b1a5e5c7e613"
+source = "git+ssh://git@github.com/dhiway/commons-node-client.git?rev=ebd76121689e27c3a6a1b0972b0f8b14d464403e#ebd76121689e27c3a6a1b0972b0f8b14d464403e"
 dependencies = [
  "anyhow",
  "blake3",
@@ -1063,7 +1063,7 @@ checksum = "2382f75942f4b3be3690fe4f86365e9c853c1587d6ee58212cebf6e2a9ccd101"
 [[package]]
 name = "commons-node-client"
 version = "0.9.48"
-source = "git+ssh://git@github.com/dhiway/commons-node-client.git?rev=4d318991bf3d4175106d0d04c447b1a5e5c7e613#4d318991bf3d4175106d0d04c447b1a5e5c7e613"
+source = "git+ssh://git@github.com/dhiway/commons-node-client.git?rev=ebd76121689e27c3a6a1b0972b0f8b14d464403e#ebd76121689e27c3a6a1b0972b0f8b14d464403e"
 dependencies = [
  "anyhow",
  "auth-wire",
@@ -1071,6 +1071,9 @@ dependencies = [
  "chacha20poly1305",
  "endpoint",
  "hex",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
  "iroh",
  "origin-protocol",
  "postcard",

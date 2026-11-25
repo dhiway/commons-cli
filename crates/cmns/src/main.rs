@@ -22,6 +22,8 @@ use iroh::SecretKey;
 use iroh_tickets::endpoint::EndpointTicket;
 use serde_json::{json, Value};
 
+mod cap;
+
 /// The node versions this build was written against. Stated on `version`, and
 /// enforced on every answer that carries a node `version` (see
 /// [`ensure_compatible`]): a different minor version is refused, not guessed at.
@@ -66,6 +68,16 @@ enum Command {
     Dataset {
         #[command(subcommand)]
         command: DatasetCommand,
+    },
+    /// The node's capabilities: its plugin documents and datasets, read over
+    /// its private local admin socket on this machine.
+    Cap {
+        /// The node's data directory; its admin socket is
+        /// `<data-dir>/admin/admin.sock`.
+        #[arg(long, global = true, default_value = cap::DEFAULT_DATA_DIR)]
+        data_dir: PathBuf,
+        #[command(subcommand)]
+        command: cap::CapCommand,
     },
 }
 
@@ -166,6 +178,7 @@ impl Cli {
                     print_json(&answer, self.human)?;
                 }
             },
+            Command::Cap { data_dir, command } => cap::run(&data_dir, command, self.human)?,
         }
         Ok(())
     }
@@ -452,6 +465,31 @@ mod tests {
             Cli::try_parse_from(["cmns", "dataset", "show", "--ticket", "t", "--key", "k"])
                 .is_err(),
             "dataset show needs a namespace"
+        );
+    }
+
+    #[test]
+    fn cap_takes_the_data_directory_on_either_side_and_defaults_to_the_nodes() {
+        let cli = Cli::try_parse_from(["cmns", "cap", "list"]).expect("cap list parses");
+        match cli.command {
+            Command::Cap { data_dir, .. } => assert_eq!(data_dir, PathBuf::from("./data")),
+            other => panic!("unexpected: {other:?}"),
+        }
+        let cli = Cli::try_parse_from(["cmns", "cap", "show", "n1", "--data-dir", "/tmp/d"])
+            .expect("cap show parses");
+        match cli.command {
+            Command::Cap {
+                data_dir,
+                command: cap::CapCommand::Show { namespace },
+            } => {
+                assert_eq!(data_dir, PathBuf::from("/tmp/d"));
+                assert_eq!(namespace, "n1");
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+        assert!(
+            Cli::try_parse_from(["cmns", "cap", "show"]).is_err(),
+            "cap show needs a namespace"
         );
     }
 
