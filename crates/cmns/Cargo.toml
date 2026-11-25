@@ -1,0 +1,22 @@
+[package]
+name = "cmns"
+description = "The Commons command line: administer a node, its sidecar and its capabilities"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "cmns"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+commons-node-client.workspace = true
+hex.workspace = true
+iroh.workspace = true
+iroh-tickets.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
