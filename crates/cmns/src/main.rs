@@ -24,7 +24,7 @@ use serde_json::{json, Value};
 /// [`ensure_compatible`]): a different minor version is refused, not guessed at.
 const COMPATIBLE_NODE: &str = "node 0.9.x (control/1, admin over iroh)";
 /// The client revision this build carries; recorded so a report can name it.
-const CLIENT_REV: &str = "a304902";
+const CLIENT_REV: &str = "b7e5d82";
 /// How long `node status` waits for the node by default.
 const DEFAULT_TIMEOUT_SECS: u64 = 15;
 

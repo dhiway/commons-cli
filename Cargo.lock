@@ -216,7 +216,7 @@ checksum = "1505bd5d3d116872e7271a6d4e16d81d0c8570876c8de68093a09ac269d8aac0"
 [[package]]
 name = "auth-wire"
 version = "0.9.48"
-source = "git+ssh://git@github.com/dhiway/commons-node-client.git?rev=a304902b08ca6ab2c1e9c63e3bbe74c1ecd8fa77#a304902b08ca6ab2c1e9c63e3bbe74c1ecd8fa77"
+source = "git+ssh://git@github.com/dhiway/commons-node-client.git?rev=b7e5d82dd79afff937d10495e978a90213def4f3#b7e5d82dd79afff937d10495e978a90213def4f3"
 dependencies = [
  "anyhow",
  "blake3",
@@ -533,7 +533,7 @@ dependencies = [
 [[package]]
 name = "commons-node-client"
 version = "0.9.48"
-source = "git+ssh://git@github.com/dhiway/commons-node-client.git?rev=a304902b08ca6ab2c1e9c63e3bbe74c1ecd8fa77#a304902b08ca6ab2c1e9c63e3bbe74c1ecd8fa77"
+source = "git+ssh://git@github.com/dhiway/commons-node-client.git?rev=b7e5d82dd79afff937d10495e978a90213def4f3#b7e5d82dd79afff937d10495e978a90213def4f3"
 dependencies = [
  "anyhow",
  "auth-wire",
