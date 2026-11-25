@@ -38,6 +38,18 @@ patches in the root `Cargo.toml` are the node's: `origin-protocol` and the
 iroh revisions it is built against must match, or the client will not
 compile.
 
+## Output
+
+JSON by default, `--human` for one `key: value` line per field. `cmns node
+status` prints the node's answer as the node wrote it, so a field's name is
+the node's (`version`, not `build`; `startedAt` in Unix seconds, not
+milliseconds). Two things a reader should know:
+
+- `relayConnected: null` means the node did not report a relay connection,
+  which for an offline node is expected; `cmn` prints `false` for the same
+  state.
+- A node that reports a version other than 0.9.x is refused, not guessed at.
+
 ## Licence
 
 Apache-2.0. See `LICENSE`.

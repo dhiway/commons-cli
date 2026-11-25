@@ -20,7 +20,8 @@ use iroh_tickets::endpoint::EndpointTicket;
 use serde_json::{json, Value};
 
 /// The node versions this build was written against. Stated on `version`, and
-/// checked against a node's answer before objecting to it.
+/// enforced on every answer that carries a node `version` (see
+/// [`ensure_compatible`]): a different minor version is refused, not guessed at.
 const COMPATIBLE_NODE: &str = "node 0.9.x (control/1, admin over iroh)";
 /// The client revision this build carries; recorded so a report can name it.
 const CLIENT_REV: &str = "a304902";
@@ -174,12 +175,34 @@ async fn node_status(ticket: &str, key_path: &PathBuf, timeout_secs: u64) -> Res
     endpoint.close().await;
 
     match answer {
-        Ok(value) => Ok(value),
+        Ok(value) => {
+            ensure_compatible(&value, &addr.id.to_string())?;
+            Ok(value)
+        }
         Err(ClientError::Refused { code, payload, .. }) => {
             bail!("the node refused the call ({code}): {payload}")
         }
         Err(err) => Err(err.into()),
     }
+}
+
+/// Refuse an answer from a node this build was not written for.
+///
+/// The check is deliberately narrow: a node that reports a `version` other
+/// than 0.9.x is refused with a sentence naming both sides, because acting on
+/// it is guessing. A node that reports no version at all is not refused — the
+/// interface answered, and the caller can see the absence.
+fn ensure_compatible(answer: &Value, node: &str) -> Result<()> {
+    let Some(version) = answer.get("version").and_then(Value::as_str) else {
+        return Ok(());
+    };
+    if version.starts_with("0.9.") {
+        return Ok(());
+    }
+    bail!(
+        "this cmns {} is written for {COMPATIBLE_NODE}; the node {node} answers version {version}. Upgrade one side; cmns refuses rather than guess.",
+        env!("CARGO_PKG_VERSION")
+    )
 }
 
 #[cfg(test)]
@@ -213,6 +236,17 @@ mod tests {
             text.contains("--ticket") || text.contains("--key"),
             "{text}"
         );
+    }
+
+    #[test]
+    fn a_node_from_another_minor_version_is_refused_by_name() {
+        let ok = json!({"version": "0.9.47"});
+        assert!(ensure_compatible(&ok, "n1").is_ok());
+        let old = json!({"version": "0.8.1"});
+        let err = ensure_compatible(&old, "n1").unwrap_err().to_string();
+        assert!(err.contains("0.8.1") && err.contains("0.9.x"), "{err}");
+        let silent = json!({"health": "ready"});
+        assert!(ensure_compatible(&silent, "n1").is_ok());
     }
 
     #[tokio::test]
