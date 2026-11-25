@@ -53,6 +53,18 @@ milliseconds). Two things a reader should know:
 - A node that reports a version other than 0.9.x is refused, and the message
   says which side is older.
 
+Every value `cmns` prints that came from a node is escaped before it reaches a
+terminal or a JSON document: C0 and C1 controls, DEL, and the Unicode format
+characters that reorder or hide text (U+200B..U+200F, U+202A..U+202E,
+U+2060..U+2069, U+061C, U+FEFF). The `--human` output writes them as Rust
+escapes (`\u{1b}`, `\r`, `\u{202e}`), so a node's title or refusal cannot
+recolour, rewrite or reorder a line, and the same applies to error messages.
+The JSON writes them as `\uXXXX`, so it is safe to `cat`. The JSON still
+decodes to exactly the node's strings; only the encoded bytes for those
+characters differ from the node's. That is a deliberate departure from
+byte-identical passthrough. A new command that prints a node's value goes
+through `escape` (human) or `encode_json` (JSON) in `crates/cmns/src/main.rs`.
+
 Reaching a node: a Commons program builds its endpoint from the Commons
 network profile, not from the ticket (spec node-access 8.1, architecture
 principle 1). The profile comes from the client repository

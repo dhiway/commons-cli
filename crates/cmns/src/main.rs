@@ -210,33 +210,76 @@ fn print_json(value: &Value, human: bool) -> Result<()> {
         match value.as_object() {
             Some(map) => {
                 for (k, v) in map {
-                    println!("{k}: {}", scalar(v));
+                    println!("{}: {}", escape(k), scalar(v));
                 }
             }
             None => println!("{}", scalar(value)),
         }
         return Ok(());
     }
-    println!("{}", serde_json::to_string_pretty(value)?);
+    println!("{}", encode_json(value)?);
     Ok(())
 }
 
-/// A string from the node made safe for a terminal: every control
-/// character (ESC, CR, BEL, C1 controls such as U+009B, DEL) is written in its
-/// escaped form, so a title or a refusal cannot move the cursor, recolour or
-/// rewrite the operator's screen. Only the human output and error messages
-/// pass through here (here, in `scalar`, and in `cap`); JSON output is the
-/// node's answer as serde_json encodes it.
+/// Whether a character from the node must not reach a terminal raw: every
+/// control character (C0 such as ESC and CR, DEL, and C1 such as U+009B CSI),
+/// and the Unicode format characters that reorder or hide text — the
+/// zero-width and directional marks U+200B..=U+200F, the bidi embeddings and
+/// overrides U+202A..=U+202E, the word joiner and bidi isolates
+/// U+2060..=U+2069, the Arabic letter mark U+061C and the BOM U+FEFF. One
+/// predicate for the human path ([`escape`]) and the JSON path
+/// ([`encode_json`]); the README's Output section states the rule.
+pub(crate) fn must_escape(c: char) -> bool {
+    c.is_control()
+        || matches!(
+            c,
+            '\u{200B}'..='\u{200F}'
+                | '\u{202A}'..='\u{202E}'
+                | '\u{2060}'..='\u{2069}'
+                | '\u{061C}'
+                | '\u{FEFF}'
+        )
+}
+
+/// A string from the node made safe for a terminal, for the human output and
+/// error messages: a control character is written as `char::escape_default`
+/// writes it (`\u{1b}`, `\r`), a format character as `char::escape_unicode`
+/// (`\u{202e}`), so a title or a refusal cannot move the cursor, recolour,
+/// reorder or hide what the operator reads.
 pub(crate) fn escape(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     for c in text.chars() {
-        if c.is_control() {
+        if !must_escape(c) {
+            out.push(c);
+        } else if c.is_control() {
             out.extend(c.escape_default());
+        } else {
+            out.extend(c.escape_unicode());
+        }
+    }
+    out
+}
+
+/// A node's answer as pretty JSON that is safe to print to a terminal.
+///
+/// serde_json escapes C0 controls inside strings but writes DEL, C1 controls
+/// and format characters raw; this rewrites each of those as `\uXXXX`. Every
+/// one of them is in the Basic Multilingual Plane and can only occur inside a
+/// string, so the output is valid JSON and decodes to exactly the node's
+/// value; only the encoded bytes for those characters differ from serde's.
+/// A raw C0 character left in the text is the printer's own newline between
+/// tokens, which is kept.
+pub(crate) fn encode_json(value: &Value) -> Result<String> {
+    let pretty = serde_json::to_string_pretty(value)?;
+    let mut out = String::with_capacity(pretty.len());
+    for c in pretty.chars() {
+        if must_escape(c) && u32::from(c) >= 0x7F {
+            out.push_str(&format!("\\u{:04x}", u32::from(c)));
         } else {
             out.push(c);
         }
     }
-    out
+    Ok(out)
 }
 
 fn scalar(value: &Value) -> String {
@@ -508,7 +551,7 @@ mod tests {
         assert_eq!(human, r"title\u{1b}[31mRED\rFORGED\u{9b}2J\u{7f}");
 
         let answer = json!({ "card": { "title": hostile } });
-        let encoded = serde_json::to_string_pretty(&answer).unwrap();
+        let encoded = encode_json(&answer).unwrap();
         assert!(encoded.contains(r"title\u001b[31mRED\rFORGED"), "{encoded}");
         let decoded: Value = serde_json::from_str(&encoded).unwrap();
         assert_eq!(
@@ -521,6 +564,38 @@ mod tests {
         let old = json!({ "version": "0.8.1\u{1b}[2K" });
         let err = ensure_compatible(&old, "n1").unwrap_err().to_string();
         assert!(!err.chars().any(char::is_control), "{err:?}");
+    }
+
+    /// The characters that reorder or hide text: a right-to-left override and
+    /// a zero-width space, next to the controls.
+    const SPOOF: &str = "ns-a\u{202E}lbat\u{200B}x\u{9b}2J\u{7f}\u{1b}[1m";
+
+    #[test]
+    fn a_bidi_or_zero_width_character_is_escaped_for_humans() {
+        let human = scalar(&json!(SPOOF));
+        assert!(!human.chars().any(must_escape), "{human:?}");
+        assert_eq!(human, r"ns-a\u{202e}lbat\u{200b}x\u{9b}2J\u{7f}\u{1b}[1m");
+        let nested = scalar(&json!({ "title": SPOOF }));
+        assert!(!nested.chars().any(must_escape), "{nested:?}");
+    }
+
+    #[test]
+    fn the_json_escapes_c1_del_and_format_characters_and_decodes_to_the_node_string() {
+        let answer = json!({ "card": { "title": SPOOF }, "n": 1 });
+        let encoded = encode_json(&answer).unwrap();
+        assert!(
+            !encoded.chars().any(|c| must_escape(c) && c != '\n'),
+            "raw character in the JSON text: {encoded:?}"
+        );
+        assert!(
+            encoded.contains(r"ns-a\u202elbat\u200bx\u009b2J\u007f\u001b[1m"),
+            "{encoded}"
+        );
+        let decoded: Value = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(
+            decoded, answer,
+            "the JSON decodes to the node's exact value"
+        );
     }
 
     #[test]

@@ -19,7 +19,7 @@ use anyhow::{bail, Context, Result};
 use clap::Subcommand;
 use serde_json::{json, Map, Value};
 
-use crate::escape;
+use crate::{encode_json, escape};
 
 /// The node's own default data directory (`commons-node`,
 /// `crates/node/src/config.rs`, `default_data_dir`).
@@ -83,7 +83,7 @@ pub fn run(data_dir: &Path, command: CapCommand, human: bool) -> Result<()> {
             if human {
                 print!("{}", render_list(&answer));
             } else {
-                println!("{}", serde_json::to_string_pretty(&answer)?);
+                println!("{}", encode_json(&answer)?);
             }
         }
         CapCommand::Show { namespace } => {
@@ -91,7 +91,7 @@ pub fn run(data_dir: &Path, command: CapCommand, human: bool) -> Result<()> {
             if human {
                 print!("{}", render_shown(kind, &answer));
             } else {
-                println!("{}", serde_json::to_string_pretty(&answer)?);
+                println!("{}", encode_json(&answer)?);
             }
         }
     }
@@ -351,7 +351,7 @@ mod tests {
             "{human}"
         );
 
-        let encoded = serde_json::to_string_pretty(&answer).unwrap();
+        let encoded = encode_json(&answer).unwrap();
         assert!(encoded.contains(r"ok\u001b[31mred\rforged"), "{encoded}");
         let decoded: Value = serde_json::from_str(&encoded).unwrap();
         assert_eq!(
@@ -372,7 +372,7 @@ mod tests {
         assert_no_raw_controls(&human);
         assert!(human.contains("card: "), "{human}");
 
-        let encoded = serde_json::to_string_pretty(&answer).unwrap();
+        let encoded = encode_json(&answer).unwrap();
         assert!(encoded.contains(r"\u001b"), "{encoded}");
         let decoded: Value = serde_json::from_str(&encoded).unwrap();
         assert_eq!(
