@@ -18,5 +18,6 @@ commons-node-client.workspace = true
 hex.workspace = true
 iroh.workspace = true
 iroh-tickets.workspace = true
+origin-protocol.workspace = true
 serde_json.workspace = true
 tokio.workspace = true

@@ -45,6 +45,12 @@ struct Cli {
 enum Command {
     /// The CLI's version and the node versions it works with.
     Version,
+    /// Which key this caller acts with.
+    Whoami {
+        /// The caller's key: 32 bytes, hex.
+        #[arg(long)]
+        key: PathBuf,
+    },
     /// A node: its health and what it reports about itself.
     Node {
         #[command(subcommand)]
@@ -123,6 +129,14 @@ impl Cli {
         match self.command {
             Command::Version => {
                 let v = version_report();
+                print_json(&v, self.human)?;
+            }
+            Command::Whoami { key } => {
+                let key = read_key(&key)?;
+                let v = json!({
+                    "endpoint_id": origin::id::z32(&key.public()),
+                    "hex": key.public().to_string(),
+                });
                 print_json(&v, self.human)?;
             }
             Command::Node { command } => match command {
@@ -237,13 +251,16 @@ async fn admin_call(op: &str, params: Value, conn: &Conn) -> Result<Value> {
             endpoint.close().await;
             bail!(
                 "the node did not answer within {timeout_secs}s (ticket names {})",
-                addr.id
+                origin::id::z32(&addr.id)
             );
         }
         Ok(Ok(client)) => client,
         Ok(Err(ClientError::Refused { code, payload, .. })) => {
             endpoint.close().await;
-            bail!("the node refused this key ({code}): {payload}. The node's operator enrols a key with `cmn admins add <endpoint-id>`.");
+            bail!(
+                "the node refused this key {caller} ({code}): {payload}. The node's operator enrols it with `cmn admins add {caller}`.",
+                caller = origin::id::z32(&key.public())
+            );
         }
         Ok(Err(err)) => {
             endpoint.close().await;
@@ -261,7 +278,7 @@ async fn admin_call(op: &str, params: Value, conn: &Conn) -> Result<Value> {
             endpoint.close().await;
             bail!(
                 "the node accepted the session but did not answer within {timeout_secs}s (ticket names {})",
-                addr.id
+                origin::id::z32(&addr.id)
             );
         }
         Ok(answer) => answer,
@@ -271,7 +288,7 @@ async fn admin_call(op: &str, params: Value, conn: &Conn) -> Result<Value> {
 
     match answer {
         Ok(value) => {
-            ensure_compatible(&value, &addr.id.to_string())?;
+            ensure_compatible(&value, &origin::id::z32(&addr.id))?;
             Ok(value)
         }
         Err(ClientError::Refused { code, payload, .. }) => {
