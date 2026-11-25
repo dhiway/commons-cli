@@ -35,3 +35,8 @@ cargo test
 
 Release artefacts are release-profile builds, never debug, when a version is
 published.
+
+## Tracking
+
+Tickets, statuses and pull request rules: `~/.commons-hq/tracker.md` (https://github.com/dhiway/commons-hq).
+Skills are in `commons-hq/skills`; run `ask-commons` to pick one.
