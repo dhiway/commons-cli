@@ -4,6 +4,11 @@
 //! hand-updated constant drifts from the pin. The lockfile already holds the
 //! exact revision Cargo resolved, so the build reads it from there: the
 //! version a user reports is the one the binary was built with.
+//!
+//! When the lockfile names no client the build still succeeds — a checkout
+//! without a lockfile is a legitimate thing to build — but it says so, and the
+//! `version_report` test refuses the result, so the fallback cannot pass as
+//! data in this repository's own gates.
 
 use std::{fs, path::PathBuf};
 
@@ -11,9 +16,15 @@ fn main() {
     let lock = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../Cargo.lock");
     println!("cargo:rerun-if-changed={}", lock.display());
     let rev = fs::read_to_string(&lock)
-        .ok()
-        .and_then(|text| client_rev(&text))
-        .unwrap_or_else(|| "unknown".into());
+        .map_err(|err| format!("{}: {err}", lock.display()))
+        .and_then(|text| {
+            client_rev(&text)
+                .ok_or_else(|| format!("{}: no commons-node-client entry", lock.display()))
+        })
+        .unwrap_or_else(|why| {
+            println!("cargo:warning=CMNS_CLIENT_REV is 'unknown': {why}");
+            "unknown".into()
+        });
     println!("cargo:rustc-env=CMNS_CLIENT_REV={rev}");
 }
 

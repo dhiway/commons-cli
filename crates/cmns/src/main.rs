@@ -18,7 +18,7 @@ use commons_node_client::{
     ClientError, ControlClient, OP_ADMIN_DATASETS_LIST, OP_ADMIN_DATASETS_SHOW,
     OP_ADMIN_HTTP_STATUS, OP_ADMIN_NODE_INFO,
 };
-use iroh::{endpoint::presets, Endpoint, RelayMode, SecretKey};
+use iroh::SecretKey;
 use iroh_tickets::endpoint::EndpointTicket;
 use serde_json::{json, Value};
 
@@ -135,7 +135,7 @@ impl Cli {
             Command::Whoami { key } => {
                 let key = read_key(&key)?;
                 let v = json!({
-                    "endpoint_id": origin::id::z32(&key.public()),
+                    "endpoint_id": key.public().to_z32(),
                     "hex": key.public().to_string(),
                 });
                 print_json(&v, self.human)?;
@@ -233,21 +233,15 @@ async fn admin_call(op: &str, params: Value, conn: &Conn) -> Result<Value> {
     )?;
     let addr = ticket.endpoint_addr().clone();
     let key = read_key(&conn.key)?;
-    // A ticket made while the node was connected to a relay carries that
-    // relay's URL, and a node reachable only through a relay is reached only
-    // by it. The relay map and the allowlist both come from the ticket, so
-    // the caller contacts no relay the ticket does not name; a ticket with no
-    // relay keeps the caller direct-only.
-    let relays: Vec<iroh::RelayUrl> = addr.relay_urls().cloned().collect();
-    let mode = if relays.is_empty() {
-        RelayMode::Disabled
-    } else {
-        RelayMode::custom(relays.clone())
-    };
-    let endpoint = Endpoint::builder(presets::Minimal)
+    // The ticket names which node to reach; it does not choose the network.
+    // A Commons program builds its endpoint from the Commons profile — the
+    // relays, their allowlist, the DNS resolver and the signed lookups — and
+    // never from the ticket's own relay list (spec node-access 8.1,
+    // architecture principle 1). A relay-only node is still reached through
+    // the profile's relays, and no relay outside the profile is contacted.
+    let endpoint = commons_node_client::profile::builder()
+        .context("reading the Commons network profile")?
         .secret_key(key.clone())
-        .relay_mode(mode)
-        .relay_allowlist(relays)
         .bind()
         .await
         .context("binding the caller's endpoint")?;
@@ -264,7 +258,7 @@ async fn admin_call(op: &str, params: Value, conn: &Conn) -> Result<Value> {
             endpoint.close().await;
             bail!(
                 "the node did not answer within {timeout_secs}s (ticket names {})",
-                origin::id::z32(&addr.id)
+                addr.id.to_z32()
             );
         }
         Ok(Ok(client)) => client,
@@ -272,7 +266,7 @@ async fn admin_call(op: &str, params: Value, conn: &Conn) -> Result<Value> {
             endpoint.close().await;
             bail!(
                 "the node refused this key {caller} ({code}): {payload}. The node's operator enrols it with `cmn admins add {caller}`.",
-                caller = origin::id::z32(&key.public())
+                caller = key.public().to_z32()
             );
         }
         Ok(Err(err)) => {
@@ -291,7 +285,7 @@ async fn admin_call(op: &str, params: Value, conn: &Conn) -> Result<Value> {
             endpoint.close().await;
             bail!(
                 "the node accepted the session but did not answer within {timeout_secs}s (ticket names {})",
-                origin::id::z32(&addr.id)
+                addr.id.to_z32()
             );
         }
         Ok(answer) => answer,
@@ -301,7 +295,7 @@ async fn admin_call(op: &str, params: Value, conn: &Conn) -> Result<Value> {
 
     match answer {
         Ok(value) => {
-            ensure_compatible(&value, &origin::id::z32(&addr.id))?;
+            ensure_compatible(&value, &addr.id.to_z32())?;
             Ok(value)
         }
         Err(ClientError::Refused { code, payload, .. }) => {
@@ -345,6 +339,7 @@ fn parse_minor(version: &str) -> Option<(u32, u32)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use iroh::{endpoint::presets, Endpoint, RelayMode};
 
     #[test]
     fn version_reports_the_cli_and_the_node_it_works_with() {
@@ -353,9 +348,23 @@ mod tests {
         let v = version_report();
         assert_eq!(v["cmns"], env!("CARGO_PKG_VERSION"));
         assert!(v["compatible"].as_str().unwrap().contains("node 0.9.x"));
-        let rev = v["client_rev"].as_str().unwrap();
+    }
+
+    /// The revision printed is the one the lockfile resolved, not a constant
+    /// and not the build script's `unknown` fallback: the seven characters
+    /// must be the start of the client's pinned source revision.
+    #[test]
+    fn version_reports_the_client_revision_the_lockfile_resolved() {
+        let lock = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../Cargo.lock");
+        let text = std::fs::read_to_string(&lock).expect("this build has a lockfile");
+        let rev = version_report()["client_rev"].as_str().unwrap().to_owned();
         assert_eq!(rev.len(), 7, "the build script read the lockfile: {rev}");
-        assert!(rev.chars().all(|c| c.is_ascii_hexdigit()), "{rev}");
+        let entry = text
+            .lines()
+            .skip_while(|line| line.trim() != r#"name = "commons-node-client""#)
+            .find_map(|line| line.trim().strip_prefix("source = \"git+"))
+            .expect("the lockfile names the client's source");
+        assert!(entry.contains(&rev), "printed {rev}, lockfile says {entry}");
     }
 
     #[test]
@@ -477,7 +486,9 @@ mod tests {
         use auth_wire::v2::{SessionCertificate, VERSION};
         use commons_node_client::{ControlRequest, ControlResponse, CONTROL_ALPN, MAX_FRAME};
 
-        const BUDGET_SECS: u64 = 2;
+        // The budget covers the dial, the session open and the call; 5 s
+        // leaves room for the first dial on a loaded machine.
+        const BUDGET_SECS: u64 = 5;
         let node_key = SecretKey::generate();
         let server = Endpoint::builder(presets::Minimal)
             .secret_key(node_key.clone())

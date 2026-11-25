@@ -1,0 +1,7 @@
+# The client is pinned over ssh://. Cargo's built-in git fetch fails to
+# authenticate with this machine's ssh-agent ("no authentication methods
+# succeeded") while the git CLI succeeds, so fetch through the CLI. The
+# command-line override is CARGO_NET_GIT_FETCH_WITH_CLI=true; this file makes
+# it the default for this repository.
+[net]
+git-fetch-with-cli = true

@@ -34,9 +34,11 @@ cargo build --release
 ```
 
 The toolchain is pinned in `rust-toolchain.toml`. The transport fork
-patches in the root `Cargo.toml` are the node's: `origin-protocol` and the
-iroh revisions it is built against must match, or the client will not
-compile.
+patches in the root `Cargo.toml` are the node's: the iroh and noq revisions
+the client and the profile are built against must match, or the graph will
+not compile. The build needs the stock toolchain; the machine's
+`~/.cargo/bin/cargo` has been a third-party fork that ignores target
+directories.
 
 ## Output
 
@@ -51,18 +53,22 @@ milliseconds). Two things a reader should know:
 - A node that reports a version other than 0.9.x is refused, and the message
   says which side is older.
 
-Reaching a node: the ticket carries the addresses the node had when the
-ticket was printed — its direct addresses and, when the node was on a relay,
-that relay's URL. The caller uses exactly those and no others: a ticket with
-a relay names it in the caller's relay map and allowlist, and a ticket with
-none keeps the caller direct-only (`RelayMode::Disabled`). A node reachable
-only through a relay is reachable while its ticket is fresh; a ticket made
-before the node joined a relay, or before it moved to another, names no
-relay that can reach it, so print a fresh one.
+Reaching a node: a Commons program builds its endpoint from the Commons
+network profile, not from the ticket (spec node-access 8.1, architecture
+principle 1). The profile comes from the client repository
+(`commons_node_client::profile`, feature `commons-profile`), which compiles
+the same commons-services revision the node pins: the Commons relay pair, its
+allowlist, a DNS resolver and the signed lookups. The ticket names which node
+to reach; it never chooses the network, and no relay outside the profile is
+contacted. The helper is deliberately not assembled here — a caller that
+builds its own relay list can drift from the network the node is on, and the
+profile is the one place that composition is tested.
 
-The signed lookup the node's own profile carries ("node id to its addresses")
-is not used: a ticket already names the addresses, and using the lookup would
-mean depending on the chain-facing Services stack for that one case.
+The consequence to know: a node must be on the Commons network to be
+reachable this way. A throwaway node on loopback with no relay is reached by
+its direct address through the same profile, but a node on some other relay
+is not, and a ticket made before the node joined a relay names no address
+that can reach it — print a fresh one.
 
 ## Building and dependencies
 
