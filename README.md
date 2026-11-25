@@ -51,10 +51,18 @@ milliseconds). Two things a reader should know:
 - A node that reports a version other than 0.9.x is refused, and the message
   says which side is older.
 
-Reaching a node today needs the node's direct addresses, which the ticket
-carries; `RelayMode::Disabled` is what is built. A node that is reachable only
-through a relay cannot be reached yet, because the relay and lookup set-up the
-client calls the "Commons profile" is not exported by the client crates.
+Reaching a node: the ticket carries the addresses the node had when the
+ticket was printed — its direct addresses and, when the node was on a relay,
+that relay's URL. The caller uses exactly those and no others: a ticket with
+a relay names it in the caller's relay map and allowlist, and a ticket with
+none keeps the caller direct-only (`RelayMode::Disabled`). A node reachable
+only through a relay is reachable while its ticket is fresh; a ticket made
+before the node joined a relay, or before it moved to another, names no
+relay that can reach it, so print a fresh one.
+
+The signed lookup the node's own profile carries ("node id to its addresses")
+is not used: a ticket already names the addresses, and using the lookup would
+mean depending on the chain-facing Services stack for that one case.
 
 ## Building and dependencies
 

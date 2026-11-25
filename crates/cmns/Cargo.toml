@@ -21,3 +21,10 @@ iroh-tickets.workspace = true
 origin-protocol.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
+
+[dev-dependencies]
+# The fake node in the call-timeout test completes a real session open, so it
+# signs a session certificate; both crates come from the client repository at
+# the same pin as the client itself.
+auth-wire = { git = "ssh://git@github.com/dhiway/commons-node-client.git", rev = "b7e5d82dd79afff937d10495e978a90213def4f3" }
+postcard = { version = "1.1.3", features = ["use-std"] }

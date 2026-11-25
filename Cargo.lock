@@ -490,12 +490,14 @@ name = "cmns"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "auth-wire",
  "clap",
  "commons-node-client",
  "hex",
  "iroh",
  "iroh-tickets",
  "origin-protocol",
+ "postcard",
  "serde_json",
  "tokio",
 ]

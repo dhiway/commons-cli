@@ -26,8 +26,9 @@ use serde_json::{json, Value};
 /// enforced on every answer that carries a node `version` (see
 /// [`ensure_compatible`]): a different minor version is refused, not guessed at.
 const COMPATIBLE_NODE: &str = "node 0.9.x (control/1, admin over iroh)";
-/// The client revision this build carries; recorded so a report can name it.
-const CLIENT_REV: &str = "b7e5d82";
+/// The client revision this build carries, read from the lockfile by the
+/// build script (`build.rs`), so it cannot drift from the pin.
+const CLIENT_REV: &str = env!("CMNS_CLIENT_REV");
 /// How long `node status` waits for the node by default.
 const DEFAULT_TIMEOUT_SECS: u64 = 15;
 
@@ -232,9 +233,21 @@ async fn admin_call(op: &str, params: Value, conn: &Conn) -> Result<Value> {
     )?;
     let addr = ticket.endpoint_addr().clone();
     let key = read_key(&conn.key)?;
+    // A ticket made while the node was connected to a relay carries that
+    // relay's URL, and a node reachable only through a relay is reached only
+    // by it. The relay map and the allowlist both come from the ticket, so
+    // the caller contacts no relay the ticket does not name; a ticket with no
+    // relay keeps the caller direct-only.
+    let relays: Vec<iroh::RelayUrl> = addr.relay_urls().cloned().collect();
+    let mode = if relays.is_empty() {
+        RelayMode::Disabled
+    } else {
+        RelayMode::custom(relays.clone())
+    };
     let endpoint = Endpoint::builder(presets::Minimal)
         .secret_key(key.clone())
-        .relay_mode(RelayMode::Disabled)
+        .relay_mode(mode)
+        .relay_allowlist(relays)
         .bind()
         .await
         .context("binding the caller's endpoint")?;
@@ -340,7 +353,9 @@ mod tests {
         let v = version_report();
         assert_eq!(v["cmns"], env!("CARGO_PKG_VERSION"));
         assert!(v["compatible"].as_str().unwrap().contains("node 0.9.x"));
-        assert_eq!(v["client_rev"], CLIENT_REV);
+        let rev = v["client_rev"].as_str().unwrap();
+        assert_eq!(rev.len(), 7, "the build script read the lockfile: {rev}");
+        assert!(rev.chars().all(|c| c.is_ascii_hexdigit()), "{rev}");
     }
 
     #[test]
@@ -357,7 +372,7 @@ mod tests {
             "0",
         ])
         .unwrap_err();
-        assert!(err.to_string().contains("0"), "{err}");
+        assert_eq!(err.kind(), clap::error::ErrorKind::ValueValidation, "{err}");
     }
 
     #[test]
@@ -395,7 +410,8 @@ mod tests {
 
         let newer = json!({"version": "0.10.0"});
         let err = ensure_compatible(&newer, "n1").unwrap_err().to_string();
-        assert!(err.contains("cmns 0.1.0 is older"), "{err}");
+        let ourselves = format!("cmns {} is older", env!("CARGO_PKG_VERSION"));
+        assert!(err.contains(&ourselves), "{err}");
 
         let unreadable = json!({"version": "one"});
         assert!(ensure_compatible(&unreadable, "n1").is_err());
@@ -448,6 +464,106 @@ mod tests {
             err.to_string().contains("ticket"),
             "unexpected error: {err}"
         );
+        std::fs::remove_file(&key).ok();
+    }
+
+    /// The timeout covers the call, not only the dial. A node that completes
+    /// the session open and then never answers must fail the command inside
+    /// the budget instead of hanging: the fake node below speaks the real
+    /// handshake (it signs a session certificate for the operations the
+    /// caller asked) and then holds the call's stream open.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_node_that_opens_the_session_and_never_answers_times_out() {
+        use auth_wire::v2::{SessionCertificate, VERSION};
+        use commons_node_client::{ControlRequest, ControlResponse, CONTROL_ALPN, MAX_FRAME};
+
+        const BUDGET_SECS: u64 = 2;
+        let node_key = SecretKey::generate();
+        let server = Endpoint::builder(presets::Minimal)
+            .secret_key(node_key.clone())
+            .relay_mode(RelayMode::Disabled)
+            .alpns(vec![CONTROL_ALPN.to_vec()])
+            .bind()
+            .await
+            .expect("binding the fake node");
+        let ticket = EndpointTicket::new(server.addr()).to_string();
+
+        let answering = server.clone();
+        let signer = node_key.clone();
+        let fake = tokio::spawn(async move {
+            let connection = answering.accept().await.unwrap().await.unwrap();
+            let (mut send, mut recv) = connection.accept_bi().await.unwrap();
+            let raw = recv.read_to_end(MAX_FRAME).await.unwrap();
+            let ControlRequest::Signed(open) = postcard::from_bytes(&raw).unwrap() else {
+                panic!("the caller's first request opens a session");
+            };
+            let asked: serde_json::Value = serde_json::from_slice(&open.payload).unwrap();
+            let session_public: [u8; 32] = asked["sessionPublic"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|n| n.as_u64().unwrap() as u8)
+                .collect::<Vec<_>>()
+                .try_into()
+                .expect("a 32-byte session key");
+            let capabilities: Vec<String> = asked["capabilities"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|c| c.as_str().unwrap().to_owned())
+                .collect();
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as u64;
+            let mut certificate = SessionCertificate {
+                version: VERSION,
+                session_id: [7; 16],
+                principal: open.principal.clone(),
+                session_public,
+                audience: open.audience.clone(),
+                capabilities,
+                issued_at_ms: now,
+                expires_at_ms: now + 120_000,
+                authorized_at_ms: now,
+                issuer_key: *signer.public().as_bytes(),
+                signature: Vec::new(),
+            };
+            auth_wire::sign(&mut certificate, &signer).unwrap();
+            let answer = ControlResponse::Session(Box::new(certificate));
+            send.write_all(&postcard::to_stdvec(&answer).unwrap())
+                .await
+                .unwrap();
+            send.finish().unwrap();
+            // The call's stream: accepted, read by nobody, answered never.
+            let (_send, _recv) = connection.accept_bi().await.unwrap();
+            std::future::pending::<()>().await;
+        });
+
+        let dir = std::env::temp_dir().join(format!("cmns-test-stall-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let key = dir.join("k.key");
+        std::fs::write(&key, hex::encode([9u8; 32])).unwrap();
+        let conn = Conn {
+            ticket,
+            key: key.clone(),
+            timeout: BUDGET_SECS,
+        };
+        let started = std::time::Instant::now();
+        let err = admin_call(OP_ADMIN_NODE_INFO, json!({}), &conn)
+            .await
+            .unwrap_err()
+            .to_string();
+        let elapsed = started.elapsed();
+        assert!(
+            err.contains("accepted the session but did not answer"),
+            "unexpected error: {err}"
+        );
+        assert!(elapsed >= Duration::from_secs(BUDGET_SECS), "{elapsed:?}");
+        assert!(elapsed < Duration::from_secs(15), "{elapsed:?}");
+
+        server.close().await;
+        fake.abort();
         std::fs::remove_file(&key).ok();
     }
 }
