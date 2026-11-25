@@ -13,8 +13,11 @@
 use std::{path::PathBuf, str::FromStr, time::Duration};
 
 use anyhow::{anyhow, bail, Context, Result};
-use clap::{Parser, Subcommand};
-use commons_node_client::{ClientError, ControlClient, OP_ADMIN_NODE_INFO};
+use clap::{Args, Parser, Subcommand};
+use commons_node_client::{
+    ClientError, ControlClient, OP_ADMIN_DATASETS_LIST, OP_ADMIN_DATASETS_SHOW,
+    OP_ADMIN_HTTP_STATUS, OP_ADMIN_NODE_INFO,
+};
 use iroh::{endpoint::presets, Endpoint, RelayMode, SecretKey};
 use iroh_tickets::endpoint::EndpointTicket;
 use serde_json::{json, Value};
@@ -47,22 +50,67 @@ enum Command {
         #[command(subcommand)]
         command: NodeCommand,
     },
+    /// The node's HTTP API: what it serves and to whom.
+    Api {
+        #[command(subcommand)]
+        command: ApiCommand,
+    },
+    /// A dataset the node hosts.
+    Dataset {
+        #[command(subcommand)]
+        command: DatasetCommand,
+    },
+}
+
+/// How to reach one node: its ticket, the caller's key, and the budget.
+#[derive(Debug, Args)]
+struct Conn {
+    /// The node's ticket, as printed by `cmn info --ticket` on the node.
+    #[arg(long)]
+    ticket: String,
+    /// The caller's admin key: 32 bytes, hex. The node's operator must
+    /// have enrolled it with `cmn admins add <endpoint-id>`.
+    #[arg(long)]
+    key: PathBuf,
+    /// Seconds to wait for the node, for the whole exchange.
+    #[arg(long, default_value_t = DEFAULT_TIMEOUT_SECS, value_parser = clap::value_parser!(u64).range(1..))]
+    timeout: u64,
 }
 
 #[derive(Debug, Subcommand)]
 enum NodeCommand {
     /// Ask a node for its status over iroh, named by its ticket.
     Status {
-        /// The node's ticket, as printed by `cmn info --ticket` on the node.
+        #[command(flatten)]
+        conn: Conn,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum ApiCommand {
+    /// What the node's HTTP door serves, and whether each part is exposed.
+    Status {
+        #[command(flatten)]
+        conn: Conn,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum DatasetCommand {
+    /// The node's own datasets, one page at a time.
+    List {
+        #[command(flatten)]
+        conn: Conn,
+        /// Continue after the cursor a previous page returned.
         #[arg(long)]
-        ticket: String,
-        /// The caller's admin key: 32 bytes, hex. The node's operator must
-        /// have enrolled it with `cmn admins add <endpoint-id>`.
-        #[arg(long)]
-        key: PathBuf,
-        /// Seconds to wait for the node, for the whole exchange.
-        #[arg(long, default_value_t = DEFAULT_TIMEOUT_SECS, value_parser = clap::value_parser!(u64).range(1..))]
-        timeout: u64,
+        cursor: Option<String>,
+    },
+    /// One dataset, with its owners and peers and their rights.
+    Show {
+        #[command(flatten)]
+        conn: Conn,
+        /// The dataset's namespace, as `dataset list` prints it.
+        namespace: String,
     },
 }
 
@@ -78,19 +126,42 @@ impl Cli {
                 print_json(&v, self.human)?;
             }
             Command::Node { command } => match command {
-                NodeCommand::Status {
-                    ticket,
-                    key,
-                    timeout,
-                } => {
-                    let runtime = tokio::runtime::Runtime::new().context("starting tokio")?;
-                    let answer = runtime.block_on(node_status(&ticket, &key, timeout))?;
+                NodeCommand::Status { conn } => {
+                    let answer = call(OP_ADMIN_NODE_INFO, json!({}), conn)?;
+                    print_json(&answer, self.human)?;
+                }
+            },
+            Command::Api { command } => match command {
+                ApiCommand::Status { conn } => {
+                    let answer = call(OP_ADMIN_HTTP_STATUS, json!({}), conn)?;
+                    print_json(&answer, self.human)?;
+                }
+            },
+            Command::Dataset { command } => match command {
+                DatasetCommand::List { conn, cursor } => {
+                    let answer = call(OP_ADMIN_DATASETS_LIST, json!({ "cursor": cursor }), conn)?;
+                    print_json(&answer, self.human)?;
+                }
+                DatasetCommand::Show { conn, namespace } => {
+                    let answer = call(
+                        OP_ADMIN_DATASETS_SHOW,
+                        json!({ "namespace": namespace }),
+                        conn,
+                    )?;
                     print_json(&answer, self.human)?;
                 }
             },
         }
         Ok(())
     }
+}
+
+/// One round trip: connect, call, close. `node status` is this with
+/// `admin.node-info`; every read command is the same exchange with another
+/// operation.
+fn call(op: &str, params: Value, conn: Conn) -> Result<Value> {
+    let runtime = tokio::runtime::Runtime::new().context("starting tokio")?;
+    runtime.block_on(admin_call(op, params, &conn))
 }
 
 /// What `cmns version` prints. A function so a test can read the fields the
@@ -140,12 +211,13 @@ fn read_key(path: &PathBuf) -> Result<SecretKey> {
     Ok(SecretKey::from_bytes(&bytes))
 }
 
-async fn node_status(ticket: &str, key_path: &PathBuf, timeout_secs: u64) -> Result<Value> {
-    let ticket = EndpointTicket::from_str(ticket.trim()).context(
+async fn admin_call(op: &str, params: Value, conn: &Conn) -> Result<Value> {
+    let timeout_secs = conn.timeout;
+    let ticket = EndpointTicket::from_str(conn.ticket.trim()).context(
         "parsing the ticket: pass the ticket `cmn info --ticket` prints, not the one `init` prints",
     )?;
     let addr = ticket.endpoint_addr().clone();
-    let key = read_key(key_path)?;
+    let key = read_key(&conn.key)?;
     let endpoint = Endpoint::builder(presets::Minimal)
         .secret_key(key.clone())
         .relay_mode(RelayMode::Disabled)
@@ -157,7 +229,7 @@ async fn node_status(ticket: &str, key_path: &PathBuf, timeout_secs: u64) -> Res
 
     let client = match tokio::time::timeout(
         budget,
-        ControlClient::connect(&endpoint, addr.clone(), &key, &[OP_ADMIN_NODE_INFO]),
+        ControlClient::connect(&endpoint, addr.clone(), &key, &[op]),
     )
     .await
     {
@@ -183,9 +255,7 @@ async fn node_status(ticket: &str, key_path: &PathBuf, timeout_secs: u64) -> Res
     // request has no deadline of its own, so a node that opens the session and
     // then stalls would otherwise hang the command.
     let left = budget.saturating_sub(started.elapsed());
-    let answer = match tokio::time::timeout(left, client.call(OP_ADMIN_NODE_INFO, &json!({}), None))
-        .await
-    {
+    let answer = match tokio::time::timeout(left, client.call(op, &params, None)).await {
         Err(_) => {
             client.close();
             endpoint.close().await;
@@ -317,13 +387,46 @@ mod tests {
         assert!(ensure_compatible(&silent, "n1").is_ok());
     }
 
+    #[test]
+    fn the_read_commands_parse_and_require_their_arguments() {
+        let api = Cli::try_parse_from(["cmns", "api", "status", "--ticket", "t", "--key", "k"])
+            .expect("api status parses");
+        assert!(matches!(api.command, Command::Api { .. }));
+
+        let list = Cli::try_parse_from([
+            "cmns", "dataset", "list", "--ticket", "t", "--key", "k", "--cursor", "c1",
+        ])
+        .expect("dataset list parses");
+        match list.command {
+            Command::Dataset {
+                command: DatasetCommand::List { cursor, .. },
+            } => {
+                assert_eq!(cursor.as_deref(), Some("c1"));
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+
+        assert!(
+            Cli::try_parse_from(["cmns", "dataset", "show", "--ticket", "t", "--key", "k"])
+                .is_err(),
+            "dataset show needs a namespace"
+        );
+    }
+
     #[tokio::test]
     async fn a_ticket_that_is_not_a_ticket_is_refused_by_name() {
         let dir = std::env::temp_dir().join(format!("cmns-test-ticket-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let key = dir.join("k.key");
         std::fs::write(&key, hex::encode([7u8; 32])).unwrap();
-        let err = node_status("not-a-ticket", &key, 1).await.unwrap_err();
+        let conn = Conn {
+            ticket: "not-a-ticket".into(),
+            key: key.clone(),
+            timeout: 1,
+        };
+        let err = admin_call(OP_ADMIN_NODE_INFO, json!({}), &conn)
+            .await
+            .unwrap_err();
         assert!(
             err.to_string().contains("ticket"),
             "unexpected error: {err}"
