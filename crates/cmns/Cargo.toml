@@ -16,6 +16,7 @@ anyhow.workspace = true
 clap.workspace = true
 commons-node-client.workspace = true
 hex.workspace = true
+icu_properties.workspace = true
 iroh.workspace = true
 iroh-tickets.workspace = true
 serde_json.workspace = true

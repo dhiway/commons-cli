@@ -54,12 +54,15 @@ milliseconds). Two things a reader should know:
   says which side is older.
 
 Every value `cmns` prints that came from a node is escaped before it reaches a
-terminal or a JSON document: C0 and C1 controls, DEL, and the Unicode format
-characters that reorder or hide text (U+200B..U+200F, U+202A..U+202E,
-U+2060..U+2069, U+061C, U+FEFF). The `--human` output writes them as Rust
-escapes (`\u{1b}`, `\r`, `\u{202e}`), so a node's title or refusal cannot
-recolour, rewrite or reorder a line, and the same applies to error messages.
-The JSON writes them as `\uXXXX`, so it is safe to `cat`. The JSON still
+terminal or a JSON document. The rule is by Unicode category, not a list: a
+character is escaped when it is a control (Cc), a format character (Cf), a line
+or paragraph separator (Zl, Zp), or a default-ignorable code point. That covers
+C0 and C1 controls, DEL, the bidi overrides and isolates, zero-width marks,
+U+2028 and U+2029, variation selectors and the tag characters. The `--human`
+output writes them as Rust escapes (`\u{1b}`, `\r`, `\u{202e}`), so a node's
+title or refusal cannot recolour, rewrite, reorder, hide or split a line, and
+the same applies to error messages. The JSON writes them as `\uXXXX`, with a
+UTF-16 surrogate pair above U+FFFF, so it is safe to `cat`. The JSON still
 decodes to exactly the node's strings; only the encoded bytes for those
 characters differ from the node's. That is a deliberate departure from
 byte-identical passthrough. A new command that prints a node's value goes

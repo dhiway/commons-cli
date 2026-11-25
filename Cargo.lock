@@ -1016,6 +1016,7 @@ dependencies = [
  "clap",
  "commons-node-client",
  "hex",
+ "icu_properties",
  "iroh",
  "iroh-tickets",
  "postcard",

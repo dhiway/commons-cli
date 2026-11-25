@@ -221,30 +221,36 @@ fn print_json(value: &Value, human: bool) -> Result<()> {
     Ok(())
 }
 
-/// Whether a character from the node must not reach a terminal raw: every
-/// control character (C0 such as ESC and CR, DEL, and C1 such as U+009B CSI),
-/// and the Unicode format characters that reorder or hide text — the
-/// zero-width and directional marks U+200B..=U+200F, the bidi embeddings and
-/// overrides U+202A..=U+202E, the word joiner and bidi isolates
-/// U+2060..=U+2069, the Arabic letter mark U+061C and the BOM U+FEFF. One
-/// predicate for the human path ([`escape`]) and the JSON path
-/// ([`encode_json`]); the README's Output section states the rule.
+/// Whether a character from the node must not reach a terminal raw, decided
+/// by Unicode category rather than by a list: a control character (Cc: C0
+/// such as ESC and CR, DEL, C1 such as U+009B CSI), a format character (Cf:
+/// the bidi overrides and isolates, zero-width marks, U+00AD, the BOM, the tag
+/// characters U+E0000..U+E007F), a line or paragraph separator (Zl, Zp:
+/// U+2028, U+2029, which break a `key: value` line), or a default-ignorable
+/// code point (variation selectors, CGJ U+034F, Hangul fillers, ...). The data
+/// is ICU's compiled Unicode tables. One predicate for the human path
+/// ([`escape`]) and the JSON path ([`encode_json`]); the README's Output
+/// section states the rule.
 pub(crate) fn must_escape(c: char) -> bool {
+    use icu_properties::{
+        props::{DefaultIgnorableCodePoint, GeneralCategory},
+        CodePointMapData, CodePointSetData,
+    };
     c.is_control()
         || matches!(
-            c,
-            '\u{200B}'..='\u{200F}'
-                | '\u{202A}'..='\u{202E}'
-                | '\u{2060}'..='\u{2069}'
-                | '\u{061C}'
-                | '\u{FEFF}'
+            CodePointMapData::<GeneralCategory>::new().get(c),
+            GeneralCategory::Control
+                | GeneralCategory::Format
+                | GeneralCategory::LineSeparator
+                | GeneralCategory::ParagraphSeparator
         )
+        || CodePointSetData::new::<DefaultIgnorableCodePoint>().contains(c)
 }
 
 /// A string from the node made safe for a terminal, for the human output and
 /// error messages: a control character is written as `char::escape_default`
-/// writes it (`\u{1b}`, `\r`), a format character as `char::escape_unicode`
-/// (`\u{202e}`), so a title or a refusal cannot move the cursor, recolour,
+/// writes it (`\u{1b}`, `\r`), any other as `char::escape_unicode`
+/// (`\u{202e}`, `\u{e0041}`), so a title or a refusal cannot move the cursor, recolour,
 /// reorder or hide what the operator reads.
 pub(crate) fn escape(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
@@ -262,19 +268,25 @@ pub(crate) fn escape(text: &str) -> String {
 
 /// A node's answer as pretty JSON that is safe to print to a terminal.
 ///
-/// serde_json escapes C0 controls inside strings but writes DEL, C1 controls
-/// and format characters raw; this rewrites each of those as `\uXXXX`. Every
-/// one of them is in the Basic Multilingual Plane and can only occur inside a
+/// serde_json escapes C0 controls inside strings but writes every other
+/// [`must_escape`] character raw; this rewrites each of those as `\uXXXX`.
+/// JSON's `\u` takes four hex digits, so a code point above U+FFFF (the tag
+/// characters, U+E0000..U+E007F, are astral) is written as its UTF-16
+/// surrogate pair, `\udb40\udc41` for U+E0041, which a JSON reader joins
+/// back into the one character. These characters can only occur inside a
 /// string, so the output is valid JSON and decodes to exactly the node's
-/// value; only the encoded bytes for those characters differ from serde's.
-/// A raw C0 character left in the text is the printer's own newline between
+/// value; only the encoded bytes for those characters differ from serde's. A
+/// raw C0 character left in the text is the printer's own newline between
 /// tokens, which is kept.
 pub(crate) fn encode_json(value: &Value) -> Result<String> {
     let pretty = serde_json::to_string_pretty(value)?;
     let mut out = String::with_capacity(pretty.len());
     for c in pretty.chars() {
         if must_escape(c) && u32::from(c) >= 0x7F {
-            out.push_str(&format!("\\u{:04x}", u32::from(c)));
+            let mut units = [0u16; 2];
+            for unit in c.encode_utf16(&mut units) {
+                out.push_str(&format!("\\u{unit:04x}"));
+            }
         } else {
             out.push(c);
         }
@@ -596,6 +608,45 @@ mod tests {
             decoded, answer,
             "the JSON decodes to the node's exact value"
         );
+    }
+
+    /// The four characters the category rule was written for: a soft hyphen
+    /// (Cf), the line separator (Zl), a variation selector (default
+    /// ignorable) and a tag character (Cf, astral: a surrogate pair in JSON).
+    #[test]
+    fn category_rule_escapes_soft_hyphen_line_separator_variation_selector_and_tag() {
+        for (c, human_form, json_form) in [
+            ('\u{AD}', r"\u{ad}", r"\u00ad"),
+            ('\u{2028}', r"\u{2028}", r"\u2028"),
+            ('\u{FE0F}', r"\u{fe0f}", r"\ufe0f"),
+            ('\u{E0041}', r"\u{e0041}", r"\udb40\udc41"),
+        ] {
+            assert!(must_escape(c), "U+{:04X} must be escaped", u32::from(c));
+            let node = format!("a{c}b");
+
+            let human = scalar(&json!(node));
+            assert!(!human.chars().any(must_escape), "{human:?}");
+            assert_eq!(human, format!("a{human_form}b"));
+
+            let answer = json!({ "title": node });
+            let encoded = encode_json(&answer).unwrap();
+            assert!(
+                !encoded.chars().any(|c| must_escape(c) && c != '\n'),
+                "raw character in the JSON text: {encoded:?}"
+            );
+            assert!(encoded.contains(&format!("a{json_form}b")), "{encoded}");
+            let decoded: Value = serde_json::from_str(&encoded).unwrap();
+            assert_eq!(
+                decoded,
+                answer,
+                "U+{:04X} decodes back exactly",
+                u32::from(c)
+            );
+        }
+        // Ordinary text, including non-Latin letters and an emoji, is untouched.
+        for c in ['e', 'é', 'न', '中', '😀', ' '] {
+            assert!(!must_escape(c), "U+{:04X} is ordinary text", u32::from(c));
+        }
     }
 
     #[test]
