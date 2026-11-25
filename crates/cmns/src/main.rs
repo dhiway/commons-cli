@@ -133,8 +133,28 @@ enum DatasetCommand {
     },
 }
 
-fn main() -> Result<()> {
-    Cli::parse().run()
+fn main() -> std::process::ExitCode {
+    // Clap prints its own usage errors and exits 2 inside `parse`; every
+    // other failure is printed here, once, and exits 1 as before.
+    match Cli::parse().run() {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(err) => {
+            eprintln!("{}", error_line(&err));
+            std::process::ExitCode::FAILURE
+        }
+    }
+}
+
+/// The one place a failure reaches the terminal. `main` prints every error
+/// through here, so text a node controls cannot reach stderr raw by any path,
+/// including errors passed through unchanged from the client or the
+/// transport (a peer's connection-close reason, say). The chain is printed on
+/// one line (`{:#}`) and escaped with [`escape`]. Escaping is idempotent:
+/// it rewrites only [`must_escape`] characters, and an already-escaped
+/// `\u{1b}` contains none, so errors that escaped their pieces earlier read
+/// the same.
+fn error_line(err: &anyhow::Error) -> String {
+    format!("Error: {}", escape(&format!("{err:#}")))
 }
 
 impl Cli {
@@ -647,6 +667,48 @@ mod tests {
         for c in ['e', 'é', 'न', '中', '😀', ' '] {
             assert!(!must_escape(c), "U+{:04X} is ordinary text", u32::from(c));
         }
+    }
+
+    /// An error the program passes through unchanged still reaches stderr
+    /// escaped: `main` prints every failure through `error_line`.
+    #[test]
+    fn an_error_carrying_node_text_is_escaped_where_main_prints_it() {
+        let hostile = "closed: a\u{1b}[2Kb\rc\u{9b}2Jd\u{202e}e\u{2028}f";
+        let err = anyhow::anyhow!("{hostile}").context("dialling the node");
+        let line = error_line(&err);
+        assert!(!line.chars().any(must_escape), "{line:?}");
+        assert!(
+            line.starts_with("Error: dialling the node: closed: a\\u{1b}[2Kb\\rc"),
+            "{line}"
+        );
+        assert_eq!(
+            error_line(&anyhow::anyhow!("{}", escape(hostile))),
+            line.replace("dialling the node: ", ""),
+            "escaping twice reads the same"
+        );
+    }
+
+    /// The reviewer's case: a node that opens the session and then closes
+    /// the connection with a crafted reason. The client returns it as
+    /// `ClientError::Unavailable`, whose chain prints the peer's reason bytes.
+    #[test]
+    fn a_peer_close_reason_is_escaped_where_main_prints_it() {
+        use iroh::endpoint::{ApplicationClose, ConnectionError, ReadError, VarInt};
+        let reason = "bye\u{1b}]0;owned\u{7}\r\u{9b}31m\u{202e}x\u{2028}y";
+        let closed = ConnectionError::ApplicationClosed(ApplicationClose {
+            error_code: VarInt::from_u32(7),
+            reason: reason.as_bytes().to_vec().into(),
+        });
+        let err: anyhow::Error =
+            ClientError::Unavailable(ReadError::ConnectionLost(closed).into()).into();
+        let raw = format!("{err:#}");
+        assert!(
+            raw.chars().any(must_escape),
+            "the test value carries the hostile reason: {raw:?}"
+        );
+        let line = error_line(&err);
+        assert!(!line.chars().any(must_escape), "{line:?}");
+        assert!(line.contains(r"bye\u{1b}]0;owned\u{7}\r"), "{line}");
     }
 
     #[test]
