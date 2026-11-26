@@ -12,7 +12,7 @@ repository = "https://github.com/dhiway/commons-cli"
 [workspace.dependencies]
 anyhow = "1.0"
 clap = { version = "4", features = ["derive"] }
-commons-node-client = { git = "ssh://git@github.com/dhiway/commons-node-client.git", rev = "ebd76121689e27c3a6a1b0972b0f8b14d464403e", features = ["commons-profile"] }
+commons-node-client = { git = "https://github.com/dhiway/commons-node-client.git", rev = "2460a97632f01bbb7c08a8c57e1935238f037699", features = ["commons-profile"] }
 hex = "0.4.3"
 # Unicode general category and default-ignorable data for the escaping rule
 # (`must_escape`); already in the graph through idna, at the locked version.

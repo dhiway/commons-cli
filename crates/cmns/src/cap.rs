@@ -44,6 +44,15 @@ pub enum CapCommand {
         /// The namespace, as `cap list` prints it.
         namespace: String,
     },
+    /// Check a capability folder with the sidecar's `cmn-http dev check`:
+    /// its report as JSON (the sidecar's human report with --human), and
+    /// its exit status, 1 when any line fails. Touches no node and needs no
+    /// running sidecar. cmn-http is found from CMN_HTTP_BIN, else beside
+    /// cmns.
+    Check {
+        /// The capability folder (manifest.json and the release's files).
+        folder: PathBuf,
+    },
 }
 
 /// Where the node's local admin socket lives under a data directory.
@@ -65,8 +74,12 @@ pub fn require_socket(data_dir: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Runs one `cap` command against the node under `data_dir`.
-pub fn run(data_dir: &Path, command: CapCommand, human: bool) -> Result<()> {
+/// Runs one `cap` command against the node under `data_dir` and answers the
+/// exit code: `check` passes the sidecar's on, the others answer 0.
+pub fn run(data_dir: &Path, command: CapCommand, human: bool) -> Result<u8> {
+    if let CapCommand::Check { folder } = &command {
+        return crate::sidecar::check(folder, human);
+    }
     require_socket(data_dir)?;
     let runtime = tokio::runtime::Runtime::new().context("starting tokio")?;
     let caller = |method: &'static str, params: Value| {
@@ -94,8 +107,9 @@ pub fn run(data_dir: &Path, command: CapCommand, human: bool) -> Result<()> {
                 println!("{}", encode_json(&answer)?);
             }
         }
+        CapCommand::Check { .. } => unreachable!("answered above"),
     }
-    Ok(())
+    Ok(0)
 }
 
 /// `plugin_list` and one page of `dataset_list`, their fields side by side

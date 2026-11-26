@@ -23,6 +23,7 @@ use iroh_tickets::endpoint::EndpointTicket;
 use serde_json::{json, Value};
 
 mod cap;
+mod sidecar;
 
 /// The node versions this build was written against. Stated on `version`, and
 /// enforced on every answer that carries a node `version` (see
@@ -78,6 +79,21 @@ enum Command {
         data_dir: PathBuf,
         #[command(subcommand)]
         command: cap::CapCommand,
+    },
+    /// The node's HTTP door, cmn-http, read over its private admin socket
+    /// on this machine. The flags are `cmn http`'s.
+    Sidecar {
+        /// cmn-http's directory; its admin socket is
+        /// `<data-dir>/admin/admin.sock` (default: `<node-data-dir>/http`, as
+        /// `cmn http` uses; cmn-http itself has no default).
+        #[arg(long, global = true, value_name = "PATH")]
+        data_dir: Option<PathBuf>,
+        /// The node's data directory (default ./data), under which the
+        /// sidecar's directory is `http` unless --data-dir names another.
+        #[arg(long, global = true, value_name = "PATH")]
+        node_data_dir: Option<PathBuf>,
+        #[command(subcommand)]
+        command: sidecar::SidecarCommand,
     },
 }
 
@@ -135,9 +151,10 @@ enum DatasetCommand {
 
 fn main() -> std::process::ExitCode {
     // Clap prints its own usage errors and exits 2 inside `parse`; every
-    // other failure is printed here, once, and exits 1 as before.
+    // other failure is printed here, once, and exits 1 as before. A command
+    // that passes on another program's status (`cap check`) answers it.
     match Cli::parse().run() {
-        Ok(()) => std::process::ExitCode::SUCCESS,
+        Ok(code) => std::process::ExitCode::from(code),
         Err(err) => {
             eprintln!("{}", error_line(&err));
             std::process::ExitCode::FAILURE
@@ -158,7 +175,8 @@ fn error_line(err: &anyhow::Error) -> String {
 }
 
 impl Cli {
-    fn run(self) -> Result<()> {
+    /// Runs the command and answers the process's exit code.
+    fn run(self) -> Result<u8> {
         match self.command {
             Command::Version => {
                 let v = version_report();
@@ -198,9 +216,19 @@ impl Cli {
                     print_json(&answer, self.human)?;
                 }
             },
-            Command::Cap { data_dir, command } => cap::run(&data_dir, command, self.human)?,
+            Command::Cap { data_dir, command } => return cap::run(&data_dir, command, self.human),
+            Command::Sidecar {
+                data_dir,
+                node_data_dir,
+                command,
+            } => sidecar::run(
+                data_dir.as_deref(),
+                node_data_dir.as_deref(),
+                command,
+                self.human,
+            )?,
         }
-        Ok(())
+        Ok(0)
     }
 }
 

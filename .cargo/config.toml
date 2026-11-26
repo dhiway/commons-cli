@@ -1,6 +1,7 @@
-# The client is pinned over ssh://. Cargo's built-in git fetch fails to
-# authenticate with this machine's ssh-agent ("no authentication methods
-# succeeded") while the git CLI succeeds, so fetch through the CLI. The
+# Git dependencies (the client and the transport forks) are fetched over
+# https through the git CLI, which uses the machine's own git configuration.
+# The client was pinned over ssh:// until it became public; Cargo's built-in
+# fetch could not authenticate with this machine's ssh-agent then. The
 # command-line override is CARGO_NET_GIT_FETCH_WITH_CLI=true; this file makes
 # it the default for this repository.
 [net]

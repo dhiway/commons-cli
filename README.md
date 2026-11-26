@@ -68,6 +68,17 @@ characters differ from the node's. That is a deliberate departure from
 byte-identical passthrough. A new command that prints a node's value goes
 through `escape` (human) or `encode_json` (JSON) in `crates/cmns/src/main.rs`.
 
+The sidecar, `cmn-http`, follows the same rule. `cmns sidecar status` prints
+the sidecar's own answer to its `status` op, read over its private admin
+socket `<data-dir>/admin/admin.sock`. The flags are `cmn http`'s: `--data-dir`
+names the sidecar's directory, and without it the directory is
+`<node-data-dir>/http`, with `--node-data-dir` defaulting to `./data`
+(`cmn-http` itself has no default). `cmns cap check <folder>` runs
+`cmn-http dev check` on the folder and passes on its report (JSON, or the
+sidecar's own human report with `--human`), its error output and its exit
+status, which is 1 when any line of the check fails. `cmn-http` is found from
+`CMN_HTTP_BIN`, else beside `cmns`.
+
 Reaching a node: a Commons program builds its endpoint from the Commons
 network profile, not from the ticket (spec node-access 8.1, architecture
 principle 1). The profile comes from the client repository
@@ -87,8 +98,8 @@ that can reach it — print a fresh one.
 
 ## Building and dependencies
 
-`commons-node-client` is pinned by revision over `ssh://`, so a builder needs
-SSH access to GitHub; the transport forks are fetched over https. The pins in
+`commons-node-client` is pinned by revision over https, as are the transport
+forks; all are public, so a builder needs no GitHub credentials. The pins in
 this repository's `transport-pins.toml` are a copy of the client repository's
 canonical file at the pinned revision; `scripts/check-transport-pins.py`
 compares them against this repository's `Cargo.lock`, so the copy must be
