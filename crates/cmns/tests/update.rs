@@ -18,6 +18,16 @@ use sha2::{Digest as _, Sha256, Sha512};
 const TARGET: &str = env!("CMNS_TARGET");
 const RUNNING: &str = env!("CARGO_PKG_VERSION");
 
+/// A release `steps` patch numbers after the running cmns, so a set of it is
+/// newer than `RUNNING` whatever version the crate carries.
+fn newer(steps: u64) -> String {
+    let mut version = semver::Version::parse(RUNNING).unwrap();
+    version.patch += steps;
+    version.pre = semver::Prerelease::EMPTY;
+    version.build = semver::BuildMetadata::EMPTY;
+    version.to_string()
+}
+
 /// ESC starting a colour sequence, a right-to-left override and a line
 /// separator: what a hostile manifest field would carry.
 const HOSTILE: &str = "\u{1b}[31m\u{202e}x\u{2028}y";
@@ -152,7 +162,7 @@ fn archive(version: &str, binary: Option<&[u8]>) -> Vec<u8> {
 
 /// One set as a channel lists it.
 struct SetSpec {
-    version: &'static str,
+    version: String,
     id: String,
     format_change: bool,
     /// The cmns asset's file name; `None` is the name `build-cmns.sh` uses.
@@ -162,9 +172,9 @@ struct SetSpec {
 }
 
 impl SetSpec {
-    fn new(version: &'static str) -> Self {
+    fn new(version: &str) -> Self {
         SetSpec {
-            version,
+            version: version.into(),
             id: version.into(),
             format_change: false,
             file_name: None,
@@ -181,7 +191,7 @@ impl SetSpec {
     fn archive(&self) -> Vec<u8> {
         self.archive
             .clone()
-            .unwrap_or_else(|| archive(self.version, Some(&fake_cmns(self.version))))
+            .unwrap_or_else(|| archive(&self.version, Some(&fake_cmns(&self.version))))
     }
 }
 
@@ -363,19 +373,21 @@ fn an_up_to_date_set_exits_0_and_a_newer_set_exits_10() {
     assert_eq!(report["cmns"]["installed"], RUNNING);
     assert_eq!(report["node"]["installed"], Value::Null);
 
-    ch.publish(2, &[SetSpec::new(RUNNING), SetSpec::new("0.9.48")]);
+    let next = newer(1);
+    ch.publish(2, &[SetSpec::new(RUNNING), SetSpec::new(&next)]);
     let run = ch.cmns(&["update", "check", "--json"]);
     let report = run.expect(10).json();
     assert_eq!(report["verdict"], "update-available");
-    assert_eq!(report["cmns"]["available"], "0.9.48");
-    assert_eq!(report["set"]["id"], "0.9.48");
+    assert_eq!(report["cmns"]["available"], next.as_str());
+    assert_eq!(report["set"]["id"], next.as_str());
     assert_eq!(report["moves_as_one_set"], false);
     assert_eq!(report["target"], TARGET);
 
     let human = ch.cmns(&["--human", "update", "check"]);
     let text = human.expect(10).stdout();
     assert!(
-        text.contains("verdict: update-available\n") && text.contains("cmns.available: 0.9.48\n"),
+        text.contains("verdict: update-available\n")
+            && text.contains(&format!("cmns.available: {next}\n")),
         "{text}"
     );
     let both = ch.cmns(&["--human", "update", "check", "--json"]);
@@ -387,7 +399,7 @@ fn an_up_to_date_set_exits_0_and_a_newer_set_exits_10() {
 
     // A format-change set is an update too, and the report says the two
     // move as one set.
-    let mut set = SetSpec::new("0.9.49");
+    let mut set = SetSpec::new(&newer(2));
     set.format_change = true;
     ch.publish(3, &[set]);
     let report = ch.cmns(&["update", "check"]).expect(10).json();
@@ -403,12 +415,14 @@ fn an_up_to_date_set_exits_0_and_a_newer_set_exits_10() {
 
 #[test]
 fn a_tampered_asset_exits_20_naming_the_check_and_current_keeps_the_old_version() {
+    let (old, new) = (newer(1), newer(2));
     let ch = Channel::new();
-    ch.publish(1, &[SetSpec::new("0.9.48")]);
+    ch.publish(1, &[SetSpec::new(&old)]);
     ch.cmns(&["update", "apply"]).expect(0);
-    assert_eq!(ch.link("current").unwrap(), Path::new("versions/0.9.48"));
+    let old_dir = PathBuf::from(format!("versions/{old}"));
+    assert_eq!(ch.link("current").unwrap(), old_dir);
 
-    let set = SetSpec::new("0.9.49");
+    let set = SetSpec::new(&new);
     let name = set.file_name();
     ch.publish(2, &[set]);
     ch.tamper(&name);
@@ -423,17 +437,17 @@ fn a_tampered_asset_exits_20_naming_the_check_and_current_keeps_the_old_version(
         report["detail"].as_str().unwrap().contains(&name),
         "{report}"
     );
-    assert_eq!(ch.link("current").unwrap(), Path::new("versions/0.9.48"));
+    assert_eq!(ch.link("current").unwrap(), old_dir);
     assert!(ch.link("previous").is_none());
-    assert!(!ch.root().join("versions/0.9.49").exists());
+    assert!(!ch.root().join(format!("versions/{new}")).exists());
     assert_eq!(ch.downloads_left(), 0, "the download folder is removed");
-    assert_eq!(ch.run_link("current"), "cmns 0.9.48\n");
+    assert_eq!(ch.run_link("current"), format!("cmns {old}\n"));
 }
 
 #[test]
 fn a_format_change_set_is_refused_with_30_naming_node_upgrade() {
     let ch = Channel::new();
-    let mut set = SetSpec::new("0.9.48");
+    let mut set = SetSpec::new(&newer(1));
     set.format_change = true;
     ch.publish(1, &[set]);
     let run = ch.cmns(&["update", "apply"]);
@@ -452,39 +466,45 @@ fn a_format_change_set_is_refused_with_30_naming_node_upgrade() {
 
 #[test]
 fn a_sequence_lower_than_the_last_seen_is_refused() {
+    let next = newer(1);
     let ch = Channel::new();
-    ch.publish(8, &[SetSpec::new("0.9.48")]);
+    ch.publish(8, &[SetSpec::new(&next)]);
     ch.cmns(&["update", "check"]).expect(10);
     let state: Value =
         serde_json::from_slice(&fs::read(ch.root().join("state.json")).unwrap()).unwrap();
     assert_eq!(state["last_sequence"]["beta"], 8);
 
     // An older manifest, validly signed, is served again.
-    ch.publish(7, &[SetSpec::new("0.9.48")]);
+    ch.publish(7, &[SetSpec::new(&next)]);
     for command in ["check", "apply"] {
         let report = ch.cmns(&["update", command]).expect(20).json();
         assert_eq!(report["check"], "sequence", "{command}: {report}");
     }
     assert!(ch.link("current").is_none());
     // The same sequence again is not lower, and is accepted.
-    ch.publish(8, &[SetSpec::new("0.9.48")]);
+    ch.publish(8, &[SetSpec::new(&next)]);
     ch.cmns(&["update", "check"]).expect(10);
 }
 
 #[test]
 fn apply_switches_current_and_keeps_the_previous_version_usable() {
+    let (old, new) = (newer(1), newer(2));
+    let (old_dir, new_dir) = (
+        PathBuf::from(format!("versions/{old}")),
+        PathBuf::from(format!("versions/{new}")),
+    );
     let ch = Channel::new();
-    ch.publish(1, &[SetSpec::new("0.9.48")]);
+    ch.publish(1, &[SetSpec::new(&old)]);
     let report = ch.cmns(&["update", "apply"]).expect(0).json();
     assert_eq!(report["verdict"], "applied");
-    assert_eq!(report["cmns"]["installed"], "0.9.48");
+    assert_eq!(report["cmns"]["installed"], old.as_str());
     assert_eq!(report["cmns"]["previous"], RUNNING);
     // No earlier version was installed here: the binary that ran stays where
     // it is, and no `previous` link is made.
     assert_eq!(report["previous"], env!("CARGO_BIN_EXE_cmns"));
     assert!(ch.link("previous").is_none());
-    assert_eq!(ch.link("current").unwrap(), Path::new("versions/0.9.48"));
-    assert_eq!(ch.run_link("current"), "cmns 0.9.48\n");
+    assert_eq!(ch.link("current").unwrap(), old_dir);
+    assert_eq!(ch.run_link("current"), format!("cmns {old}\n"));
     let current = ch.root().join("current");
     let quoted = format!("export PATH='{}':\"$PATH\"", current.display());
     assert!(
@@ -492,13 +512,13 @@ fn apply_switches_current_and_keeps_the_previous_version_usable() {
         "{report}"
     );
 
-    ch.publish(2, &[SetSpec::new("0.9.48"), SetSpec::new("0.9.49")]);
+    ch.publish(2, &[SetSpec::new(&old), SetSpec::new(&new)]);
     let report = ch.cmns(&["update", "apply"]).expect(0).json();
-    assert_eq!(report["cmns"]["previous"], "0.9.48");
-    assert_eq!(ch.link("current").unwrap(), Path::new("versions/0.9.49"));
-    assert_eq!(ch.link("previous").unwrap(), Path::new("versions/0.9.48"));
-    assert_eq!(ch.run_link("current"), "cmns 0.9.49\n");
-    assert_eq!(ch.run_link("previous"), "cmns 0.9.48\n");
+    assert_eq!(report["cmns"]["previous"], old.as_str());
+    assert_eq!(ch.link("current").unwrap(), new_dir);
+    assert_eq!(ch.link("previous").unwrap(), old_dir);
+    assert_eq!(ch.run_link("current"), format!("cmns {new}\n"));
+    assert_eq!(ch.run_link("previous"), format!("cmns {old}\n"));
     assert_eq!(ch.downloads_left(), 0);
 
     // Installed and current: nothing is downloaded, and check agrees.
@@ -510,47 +530,51 @@ fn apply_switches_current_and_keeps_the_previous_version_usable() {
         .map(|e| e.unwrap().file_name().into_string().unwrap())
         .collect();
     versions.sort();
-    assert_eq!(versions, ["0.9.48", "0.9.49"]);
+    let mut expected = [old, new];
+    expected.sort();
+    assert_eq!(versions, expected);
 }
 
 /// Failures after the manifest and the asset passed verification, before
 /// the switch: `current` still names the old version, which still runs.
 #[test]
 fn a_failure_between_download_and_switch_leaves_current_on_the_old_version() {
+    let (old, new) = (newer(1), newer(2));
+    let old_dir = PathBuf::from(format!("versions/{old}"));
     let ch = Channel::new();
-    ch.publish(1, &[SetSpec::new("0.9.48")]);
+    ch.publish(1, &[SetSpec::new(&old)]);
     ch.cmns(&["update", "apply"]).expect(0);
 
     // A signed archive that does not hold the binary.
-    let mut set = SetSpec::new("0.9.49");
-    set.archive = Some(archive("0.9.49", None));
+    let mut set = SetSpec::new(&new);
+    set.archive = Some(archive(&new, None));
     ch.publish(2, &[set]);
     let run = ch.cmns(&["update", "apply"]);
     assert!(
         run.expect(1)
             .stderr()
-            .contains(&format!("holds no cmns-0.9.49-{TARGET}/cmns")),
+            .contains(&format!("holds no cmns-{new}-{TARGET}/cmns")),
         "{}",
         run.stderr()
     );
-    assert_eq!(ch.link("current").unwrap(), Path::new("versions/0.9.48"));
-    assert!(!ch.root().join("versions/0.9.49").exists());
+    assert_eq!(ch.link("current").unwrap(), old_dir);
+    assert!(!ch.root().join(format!("versions/{new}")).exists());
     assert_eq!(ch.downloads_left(), 0);
 
     // The version's folder cannot be made: a file is in its place.
-    ch.publish(3, &[SetSpec::new("0.9.49")]);
-    fs::write(ch.root().join("versions/0.9.49"), "in the way").unwrap();
+    ch.publish(3, &[SetSpec::new(&new)]);
+    fs::write(ch.root().join(format!("versions/{new}")), "in the way").unwrap();
     ch.cmns(&["update", "apply"]).expect(1);
-    assert_eq!(ch.link("current").unwrap(), Path::new("versions/0.9.48"));
+    assert_eq!(ch.link("current").unwrap(), old_dir);
     assert!(ch.link("previous").is_none());
-    assert_eq!(ch.run_link("current"), "cmns 0.9.48\n");
+    assert_eq!(ch.run_link("current"), format!("cmns {old}\n"));
     assert_eq!(ch.downloads_left(), 0);
 }
 
 #[test]
 fn a_channel_with_no_trusted_key_is_refused_with_30() {
     let ch = Channel::new();
-    ch.publish(1, &[SetSpec::new("0.9.48")]);
+    ch.publish(1, &[SetSpec::new(&newer(1))]);
     let source = ch.source();
     let run = ch.cmns_raw(&["update", "check", "--source", source.to_str().unwrap()]);
     let report = run.expect(30).json();
@@ -586,14 +610,15 @@ fn node_upgrade_outside_a_dry_run_is_refused_before_reading_anything() {
 
 #[test]
 fn node_upgrade_dry_run_prints_the_set_the_verdict_and_the_steps_and_changes_nothing() {
+    let next = newer(1);
     let ch = Channel::new();
-    ch.publish(1, &[SetSpec::new("0.9.48")]);
+    ch.publish(1, &[SetSpec::new(&next)]);
     let report = ch.cmns(&["node", "upgrade", "--dry-run"]).expect(0).json();
     assert_eq!(report["verdict"], "dry-run");
     assert_eq!(report["changed"], "nothing");
     assert_eq!(report["compatibility"], "same-data-directory");
-    assert_eq!(report["set"]["id"], "0.9.48");
-    assert_eq!(report["node"]["target"], "0.9.48");
+    assert_eq!(report["set"]["id"], next.as_str());
+    assert_eq!(report["node"]["target"], next.as_str());
     let steps: Vec<&str> = report["steps"]
         .as_array()
         .unwrap()
@@ -606,7 +631,7 @@ fn node_upgrade_dry_run_prints_the_set_the_verdict_and_the_steps_and_changes_not
         "{steps:?}"
     );
 
-    let mut set = SetSpec::new("0.9.49");
+    let mut set = SetSpec::new(&newer(2));
     set.format_change = true;
     ch.publish(2, &[set]);
     let text = ch
@@ -628,29 +653,32 @@ fn node_upgrade_dry_run_prints_the_set_the_verdict_and_the_steps_and_changes_not
 /// the human path, and the JSON still decodes to the manifest's text.
 #[test]
 fn text_from_the_manifest_is_escaped_on_the_json_and_the_human_path() {
+    let (old, new) = (newer(1), newer(2));
     let ch = Channel::new();
-    let mut set = SetSpec::new("0.9.48");
-    set.id = format!("0.9.48{HOSTILE}");
+    let mut set = SetSpec::new(&old);
+    set.id = format!("{old}{HOSTILE}");
     ch.publish(1, &[set]);
 
     let run = ch.cmns(&["update", "check"]);
     let stdout = run.expect(10).stdout();
     assert_no_raw(&stdout);
     assert!(
-        stdout.contains("\"id\": \"0.9.48\\u001b[31m\\u202ex\\u2028y\""),
+        stdout.contains(&format!("\"id\": \"{old}\\u001b[31m\\u202ex\\u2028y\"")),
         "{stdout}"
     );
     let report: Value = serde_json::from_str(&stdout).unwrap();
-    assert_eq!(report["set"]["id"], format!("0.9.48{HOSTILE}"));
+    assert_eq!(report["set"]["id"], format!("{old}{HOSTILE}"));
 
     let human = ch.cmns(&["--human", "update", "check"]).expect(10).stdout();
     assert_no_raw(&human);
     assert!(
-        human.contains("set.id: 0.9.48\\u{1b}[31m\\u{202e}x\\u{2028}y\n"),
+        human.contains(&format!(
+            "set.id: {old}\\u{{1b}}[31m\\u{{202e}}x\\u{{2028}}y\n"
+        )),
         "{human}"
     );
 
-    let mut set = SetSpec::new("0.9.49");
+    let mut set = SetSpec::new(&new);
     set.file_name = Some(format!("cmns\u{1b}[2K\u{202e}-{TARGET}.tar.gz"));
     let name = set.file_name();
     ch.publish(2, &[set]);
