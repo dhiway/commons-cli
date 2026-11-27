@@ -13,13 +13,25 @@ repository = "https://github.com/dhiway/commons-cli"
 anyhow = "1.0"
 clap = { version = "4", features = ["derive"] }
 commons-node-client = { git = "https://github.com/dhiway/commons-node-client.git", rev = "2460a97632f01bbb7c08a8c57e1935238f037699", features = ["commons-profile"] }
+# The release manifest's checks (`cmns update`, `cmns node upgrade`): the
+# library is the only place they live. Over https:// at a full commit.
+commons-release-verify = { git = "https://github.com/dhiway/commons-releases", rev = "b9e955461012e26fb34c25be27cbc70cb0e49727" }
+# Reading the one `cmns` entry out of a verified release archive.
+flate2 = { version = "1.1.11", default-features = false, features = ["rust_backend"] }
 hex = "0.4.3"
 # Unicode general category and default-ignorable data for the escaping rule
 # (`must_escape`); already in the graph through idna, at the locked version.
 icu_properties = "2.4.0"
 iroh = { version = "1.5", features = ["default"] }
 iroh-tickets = "1"
+# The manifest and asset downloads, with the TLS stack iroh already carries:
+# reqwest without its own provider, rustls with ring installed as the default.
+reqwest = { version = "0.13.5", default-features = false, features = ["rustls-no-provider"] }
+rustls = { version = "0.23.46", default-features = false, features = ["ring", "std"] }
+semver = "1.0.28"
 serde_json = "1.0.154"
+tar = { version = "0.4.46", default-features = false }
+time = { version = "0.3.55", default-features = false, features = ["std"] }
 tokio = { version = "1.54.1", features = ["macros", "rt-multi-thread"] }
 
 # The node's transport forks, as in commons-node-client's transport-pins.toml.

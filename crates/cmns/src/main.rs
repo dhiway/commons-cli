@@ -24,6 +24,7 @@ use serde_json::{json, Value};
 
 mod cap;
 mod sidecar;
+mod update;
 
 /// The node versions this build was written against. Stated on `version`, and
 /// enforced on every answer that carries a node `version` (see
@@ -95,6 +96,11 @@ enum Command {
         #[command(subcommand)]
         command: sidecar::SidecarCommand,
     },
+    /// cmns's own updates, from a channel's signed release manifest.
+    Update {
+        #[command(subcommand)]
+        command: update::UpdateCommand,
+    },
 }
 
 /// How to reach one node: its ticket, the caller's key, and the budget.
@@ -119,6 +125,10 @@ enum NodeCommand {
         #[command(flatten)]
         conn: Conn,
     },
+    /// What upgrading the node to a channel's newest set would do. Only
+    /// `--dry-run` is available: it changes nothing. Exit 0 printed, 20
+    /// verification failed, 30 refused (always, without --dry-run).
+    Upgrade(update::UpgradeArgs),
 }
 
 #[derive(Debug, Subcommand)]
@@ -195,7 +205,13 @@ impl Cli {
                     let answer = call(OP_ADMIN_NODE_INFO, json!({}), conn)?;
                     print_json(&answer, self.human)?;
                 }
+                NodeCommand::Upgrade(args) => {
+                    return update::print(&update::node_upgrade(&args)?, self.human)
+                }
             },
+            Command::Update { command } => {
+                return update::print(&update::update(command, self.human)?, self.human)
+            }
             Command::Api { command } => match command {
                 ApiCommand::Status { conn } => {
                     let answer = call(OP_ADMIN_HTTP_STATUS, json!({}), conn)?;
@@ -360,7 +376,19 @@ fn read_key(path: &PathBuf) -> Result<SecretKey> {
     Ok(SecretKey::from_bytes(&bytes))
 }
 
+/// [`admin_exchange`], refused unless the node is one this build works with
+/// ([`ensure_compatible`]).
 async fn admin_call(op: &str, params: Value, conn: &Conn) -> Result<Value> {
+    let (value, node) = admin_exchange(op, params, conn).await?;
+    ensure_compatible(&value, &node)?;
+    Ok(value)
+}
+
+/// One admin call: the answer as the node sent it, and the node's endpoint
+/// id. `cmns update` reads the node's version straight from this, since a
+/// node of another minor version is the case an update exists for; every
+/// other command goes through [`admin_call`].
+async fn admin_exchange(op: &str, params: Value, conn: &Conn) -> Result<(Value, String)> {
     let timeout_secs = conn.timeout;
     let ticket = EndpointTicket::from_str(conn.ticket.trim()).context(
         "parsing the ticket: pass the ticket `cmn info --ticket` prints, not the one `init` prints",
@@ -430,10 +458,7 @@ async fn admin_call(op: &str, params: Value, conn: &Conn) -> Result<Value> {
     endpoint.close().await;
 
     match answer {
-        Ok(value) => {
-            ensure_compatible(&value, &addr.id.to_z32())?;
-            Ok(value)
-        }
+        Ok(value) => Ok((value, addr.id.to_z32())),
         Err(ClientError::Refused { code, payload, .. }) => {
             bail!(
                 "the node refused the call ({}): {}",

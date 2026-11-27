@@ -26,6 +26,9 @@ fn main() {
             "unknown".into()
         });
     println!("cargo:rustc-env=CMNS_CLIENT_REV={rev}");
+    // `cmns update` picks the release asset built for this binary's target.
+    let target = std::env::var("TARGET").expect("cargo sets TARGET for a build script");
+    println!("cargo:rustc-env=CMNS_TARGET={target}");
 }
 
 /// The short revision of `commons-node-client` in a lockfile, from its
